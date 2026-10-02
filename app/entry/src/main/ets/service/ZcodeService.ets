@@ -12,6 +12,7 @@ import { BindingInfo, SnapshotResult, SnapshotRuntime, SessionMetaInfo, ModelCon
   THOUGHT_MAX, TOOL_OUTPUT_MAX, TOOL_INPUT_MAX, truncateText, genClientId } from '../model/Models';
 import { BindingStore } from '../store/BindingStore';
 import { AppError, ERR_BRIDGE, ERR_NOT_CONNECTED } from '../model/AppError';
+import { PhoneInfo } from '../model/PhoneInfo';
 
 const TAG: string = 'ZCRemote';
 
@@ -128,6 +129,20 @@ export class ZcodeService {
         this.closeBridgeSession();
       }
       if (state === STATE_PAIRED) {
+        // 上报本机设备信息（桌面"已连接设备"显示名来源）
+        this.sendApp({
+          'zcode_type': 'mobile-view-state-update',
+          'viewState': { 'updatedAt': Date.now() } as Record<string, Object>,
+          'deviceInfo': {
+            'platform': 'web',
+            'version': this.binding !== undefined ? this.binding.appVersion : 'web',
+            'name': PhoneInfo.phoneName(),
+            'userAgent': PhoneInfo.userAgent(this.binding !== undefined ? this.binding.appVersion : 'web'),
+            'language': PhoneInfo.language(),
+            'viewport': PhoneInfo.viewport(),
+            'updatedAt': Date.now()
+          } as Record<string, Object>
+        } as Record<string, Object>);
         // 每次配对成功后主动拉取工作区/任务列表
         this.sendApp({
           'zcode_type': 'bootstrap-request',

@@ -5,6 +5,7 @@ import cryptoFramework from '@ohos.security.cryptoFramework';
 import { Bytes } from './Bytes';
 import { jStr } from './Json';
 import { BindingInfo } from '../model/Models';
+import { PhoneInfo } from '../model/PhoneInfo';
 
 const TAG: string = 'ZCRemote';
 
@@ -180,7 +181,12 @@ export class RelayClient {
       'type': 'auth_init',
       'role': 'terminal',
       'device_sid': this.binding.deviceSid,
-      'meta': { 'platform': 'web', 'version': this.binding.appVersion, 'name': this.binding.deviceName } as Record<string, Object>,
+      'meta': {
+        'platform': 'web',
+        'version': this.binding.appVersion,
+        'name': PhoneInfo.phoneName(),
+        'userAgent': PhoneInfo.userAgent(this.binding.appVersion)
+      } as Record<string, Object>,
       'client_ts': Date.now()
     };
     this.sendText(JSON.stringify(init));
