@@ -73,6 +73,7 @@ App 内的错误均带分类标签（如 `[AUTH]`、`[DESKTOP_OFFLINE]`），对
 | 目录 | 内容 |
 |---|---|
 | [`app/`](app/) | 鸿蒙 APP（DevEco Studio / ArkTS），构建指南见其 README |
+| [`HANDOFF.md`](HANDOFF.md) | 开发/接手文档：当前架构与安全边界、坑清单、验证流程（接手或 AI 工具先读） |
 | [`research/`](research/) | 协议逆向成果：完整协议规范（分层帧格式、鉴权、RPC 通道、方法签名） |
 | [`probe/`](probe/) | Node 探针与工具：连接测试、快照抓取、协议层单元测试；内含 ZCode 上游代码切片（出处见 [NOTICE.md](NOTICE.md)） |
 
