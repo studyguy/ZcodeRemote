@@ -1,7 +1,7 @@
 import { promptAction, router } from '@kit.ArkUI';
 import { ChatMessage, ContentPart, ToolCall, SnapshotRuntime, PermissionRequest,
   PermissionOption, ElicitationRequest, ModelOption, ModelConfig, SessionMetaInfo,
-  ModelSelectionView, ModelProviderGroup, ModelEntry,
+  ModelSelectionView, ModelProviderGroup, ModelEntry, QueueItem,
   EntitlementSnapshot, EntitlementLimit, limitTypeMatch, limitPeriodLabel,
   formatTime, statusKind, formatTokens, modeLabel } from '../model/Models';
 import { AppError } from '../model/AppError';
@@ -26,6 +26,8 @@ struct SessionPage {
   @State entitlement: EntitlementSnapshot = new EntitlementSnapshot();
   @State modelSheetShow: boolean = false;
   @State sheetProvider: ModelProviderGroup | undefined = undefined;
+  @State editingQueueItemId: string = '';
+  @State inputText: string = '';
   @State sending: boolean = false;
   private service: ZcodeService = ZcodeService.getInstance();
   private taskId: string = '';
@@ -426,8 +428,38 @@ struct SessionPage {
         })
       }
 
-      // ===== 底部操作区: 审批卡片 + 停止按钮 + 输入框 =====
+      // ===== 底部操作区: 队列卡片 + 审批卡片 + 停止按钮 + 输入框 =====
       Column({ space: 8 }) {
+        // 排队消息卡片
+        ForEach(this.runtime.pendingCommands, (qi: QueueItem) => {
+          QueueItemCardView({
+            text: qi.text,
+            editing: this.editingQueueItemId === qi.queueItemId,
+            onSendNow: () => {
+              this.service.sendQueuedNow(this.taskId, this.workspacePath, qi.queueItemId)
+                .then(() => this.pollOnce(false))
+                .catch((e: Error) => {
+                  promptAction.showToast({ message: '发送失败: ' + e.message, duration: 2500 });
+                });
+            },
+            onDelete: () => {
+              this.service.deleteQueueItem(this.taskId, this.workspacePath, qi.queueItemId)
+                .then(() => this.pollOnce(false))
+                .catch((e: Error) => {
+                  promptAction.showToast({ message: '删除失败: ' + e.message, duration: 2500 });
+                });
+            },
+            onStartEdit: () => {
+              this.editingQueueItemId = qi.queueItemId;
+              this.inputText = qi.text;
+            },
+            onCancelEdit: () => {
+              this.editingQueueItemId = '';
+              this.inputText = '';
+            }
+          })
+        }, (qi: QueueItem) => qi.queueItemId + qi.text.length.toString())
+
         // 待审批卡片（权限 / 问答）
         ForEach(this.runtime.pendingPermissions, (perm: PermissionRequest) => {
           PermissionCardView({
@@ -854,6 +886,21 @@ struct SessionPage {
   private onSend(text: string): void {
     const body = text.trim();
     if (body.length === 0 || this.sending) {
+      return;
+    }
+    // 编辑模式：改写排队中的消息而非发送新消息
+    if (this.editingQueueItemId.length > 0) {
+      this.sending = true;
+      this.service.editQueueItem(this.taskId, this.workspacePath, this.editingQueueItemId, body)
+        .then(() => {
+          this.sending = false;
+          this.editingQueueItemId = '';
+          this.pollOnce(false);
+        })
+        .catch((e: Error) => {
+          this.sending = false;
+          promptAction.showToast({ message: '编辑失败: ' + e.message, duration: 2500 });
+        });
       return;
     }
     this.sending = true;
@@ -1411,5 +1458,70 @@ struct ElicitationCardView {
     .borderRadius(10)
     .border({ width: 1, color: $r('app.color.accent') })
     .backgroundColor($r('app.color.bg_card'))
+  }
+}
+
+
+/** 排队消息卡片（立即发送 / 编辑 / 删除） */
+@Component
+struct QueueItemCardView {
+  @Prop text: string;
+  @Prop editing: boolean;
+  onSendNow: () => void = () => {
+  };
+  onDelete: () => void = () => {
+  };
+  onStartEdit: () => void = () => {
+  };
+  onCancelEdit: () => void = () => {
+  };
+
+  build() {
+    Row({ space: 8 }) {
+      Circle({ width: 7, height: 7 })
+        .fill($r('app.color.state_warn'))
+      Column({ space: 2 }) {
+        Text('排队中')
+          .fontSize(11)
+          .fontColor($r('app.color.text_secondary'))
+        Text(this.text)
+          .fontSize(12)
+          .fontColor($r('app.color.text_primary'))
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+
+      Text('立即')
+        .fontSize(11)
+        .fontColor($r('app.color.accent'))
+        .onClick(() => {
+          this.onSendNow();
+        })
+      Text(this.editing ? '取消' : '编辑')
+        .fontSize(11)
+        .fontColor($r('app.color.text_secondary'))
+        .onClick(() => {
+          if (this.editing) {
+            this.onCancelEdit();
+          } else {
+            this.onStartEdit();
+          }
+        })
+      Text('删除')
+        .fontSize(11)
+        .fontColor($r('app.color.btn_danger_text'))
+        .onClick(() => {
+          this.onDelete();
+        })
+    }
+    .width('100%')
+    .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+    .borderRadius(8)
+    .border({ width: 1, color: this.editing ? $r('app.color.accent') : $r('app.color.divider') })
+    .backgroundColor($r('app.color.bg_input'))
+    .alignItems(VerticalAlign.Center)
   }
 }

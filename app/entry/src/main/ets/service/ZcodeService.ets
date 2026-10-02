@@ -6,7 +6,7 @@ import { RelayClient, STATE_CLOSED, STATE_ERROR, STATE_PAIRED } from '../protoco
 import { jArr, jNum, jRec, jStr, jBool, parseObj } from '../protocol/Json';
 import { BindingInfo, SnapshotResult, SnapshotRuntime, SessionMetaInfo, ModelConfig, ModelOption,
   ModelSelectionView, ModelProviderGroup, ModelEntry, EntitlementSnapshot, EntitlementLimit,
-  pickLimit,
+  pickLimit, QueueItem,
   TaskItem, TaskGroup, WorkspaceItem, ChatMessage, ContentPart, ToolCall,
   PermissionRequest, PermissionOption, ElicitationRequest,
   THOUGHT_MAX, TOOL_OUTPUT_MAX, TOOL_INPUT_MAX, truncateText, genClientId } from '../model/Models';
@@ -866,6 +866,31 @@ export class ZcodeService {
     });
   }
 
+  /** 队列项立即发送 */
+  async sendQueuedNow(taskId: string, workspacePath: string, queueItemId: string): Promise<void> {
+    await this.sendConversationCommand(taskId, workspacePath, 'sendQueuedNow', queueItemId,
+      (): Record<string, Object> => {
+        return { 'queueItemId': queueItemId } as Record<string, Object>;
+      });
+  }
+
+  /** 编辑排队消息文本 */
+  async editQueueItem(taskId: string, workspacePath: string, queueItemId: string,
+    newText: string): Promise<void> {
+    await this.sendConversationCommand(taskId, workspacePath, 'editQueueItem', queueItemId,
+      (): Record<string, Object> => {
+        return { 'queueItemId': queueItemId, 'newText': newText } as Record<string, Object>;
+      });
+  }
+
+  /** 删除排队消息 */
+  async deleteQueueItem(taskId: string, workspacePath: string, queueItemId: string): Promise<void> {
+    await this.sendConversationCommand(taskId, workspacePath, 'deleteQueueItem', queueItemId,
+      (): Record<string, Object> => {
+        return { 'queueItemId': queueItemId } as Record<string, Object>;
+      });
+  }
+
   /** zcode-agent 通道的 session 级调用通用封装 */
   private async agentSessionCall(taskId: string, workspacePath: string, method: string,
     fillArgs: (args: Record<string, Object>) => void): Promise<void> {
@@ -1316,6 +1341,22 @@ function parseSnapshotRuntime(snapshot: Record<string, Object>): SnapshotRuntime
     }
     if (item.requestId.length > 0) {
       rt.pendingElicitations.push(item);
+    }
+  }
+  // 排队中的消息
+  const cmdArr = jArr(rec, 'pendingCommands');
+  for (const c of cmdArr) {
+    const crec = jRec({ 'v': c } as Record<string, Object>, 'v');
+    if (crec === undefined) {
+      continue;
+    }
+    const qi = new QueueItem();
+    qi.queueItemId = jStr(crec, 'queueItemId');
+    qi.sourceCommandId = jStr(crec, 'sourceCommandId');
+    qi.kind = jStr(crec, 'kind');
+    qi.text = jStr(crec, 'text');
+    if (qi.queueItemId.length > 0 && qi.text.length > 0) {
+      rt.pendingCommands.push(qi);
     }
   }
   return rt;

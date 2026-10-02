@@ -173,6 +173,8 @@ export class SnapshotRuntime {
   pendingPermissions: Array<PermissionRequest> = new Array<PermissionRequest>();
   /** 用户输入问答 */
   pendingElicitations: Array<ElicitationRequest> = new Array<ElicitationRequest>();
+  /** 排队中的消息 */
+  pendingCommands: Array<QueueItem> = new Array<QueueItem>();
   /** 上下文占用（tokens） */
   contextUsed: number = 0;
   contextSize: number = 0;
@@ -237,6 +239,14 @@ export class ModelConfig {
     }
     return undefined;
   }
+}
+
+/** 排队中的消息（快照 runtime.pendingCommands 项） */
+export class QueueItem {
+  queueItemId: string = '';
+  sourceCommandId: string = '';
+  text: string = '';
+  kind: string = '';
 }
 
 /** 渠道额度项（usage-stats.getEntitlementSnapshot 的 quota.limits 项） */
