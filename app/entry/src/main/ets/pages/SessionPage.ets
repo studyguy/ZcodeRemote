@@ -24,6 +24,8 @@ struct SessionPage {
   @State config: ModelConfig = new ModelConfig();
   @State modelView: ModelSelectionView = new ModelSelectionView();
   @State entitlement: EntitlementSnapshot = new EntitlementSnapshot();
+  @State modelSheetShow: boolean = false;
+  @State sheetProvider: ModelProviderGroup | undefined = undefined;
   @State sending: boolean = false;
   private service: ZcodeService = ZcodeService.getInstance();
   private taskId: string = '';
@@ -468,6 +470,113 @@ struct SessionPage {
     .width('100%')
     .height('100%')
     .backgroundColor($r('app.color.bg_page'))
+    .bindSheet(this.modelSheetShow, this.modelSheetBuilder(), {
+      height: 420,
+      showClose: false,
+      onDisappear: () => {
+        this.modelSheetShow = false;
+      }
+    })
+  }
+
+  @Builder
+  modelSheetBuilder() {
+    Column() {
+      Row({ space: 8 }) {
+        if (this.sheetProvider !== undefined) {
+          Text('‹')
+            .fontSize(18)
+            .fontColor($r('app.color.text_primary'))
+            .width(32)
+            .onClick(() => {
+              this.sheetProvider = undefined;
+            })
+        }
+        Text(this.sheetProvider !== undefined ? this.sheetProvider.providerName : '选择渠道')
+          .fontSize(15)
+          .fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.text_primary'))
+          .layoutWeight(1)
+        Button() {
+          Text('×')
+            .fontSize(16)
+            .fontColor($r('app.color.text_secondary'))
+        }
+        .width(30)
+        .height(28)
+        .backgroundColor($r('app.color.btn_secondary_bg'))
+        .onClick(() => {
+          this.modelSheetShow = false;
+        })
+      }
+      .width('100%')
+      .padding({ left: 14, right: 14, top: 12, bottom: 8 })
+
+      List({ space: 4 }) {
+        if (this.sheetProvider === undefined) {
+          ForEach(this.modelView.providers, (prov: ModelProviderGroup) => {
+            ListItem() {
+              Row({ space: 8 }) {
+                Column({ space: 2 }) {
+                  Text(prov.providerName)
+                    .fontSize(14)
+                    .fontColor($r('app.color.text_primary'))
+                  Text(prov.models.length.toString() + ' 个模型')
+                    .fontSize(10)
+                    .fontColor($r('app.color.text_tertiary'))
+                }
+                .alignItems(HorizontalAlign.Start)
+                .layoutWeight(1)
+
+                Text('›')
+                  .fontSize(16)
+                  .fontColor($r('app.color.text_tertiary'))
+              }
+              .width('100%')
+              .padding({ left: 14, right: 14, top: 12, bottom: 12 })
+              .borderRadius(10)
+              .backgroundColor($r('app.color.bg_card'))
+              .onClick(() => {
+                this.sheetProvider = prov;
+              })
+            }
+          }, (prov: ModelProviderGroup) => prov.providerId)
+        } else {
+          ForEach(this.sheetModels(), (m: ModelEntry) => {
+            ListItem() {
+              Row({ space: 8 }) {
+                Text(this.isCurrentModel(this.sheetProviderProviderId() + '/' + m.modelId) ? '✓ ' : '')
+                  .fontSize(14)
+                  .fontColor($r('app.color.accent'))
+                  .width(24)
+                Text(m.modelId)
+                  .fontSize(14)
+                  .fontColor($r('app.color.text_primary'))
+                  .layoutWeight(1)
+                if (m.contextWindow > 0) {
+                  Text(formatTokens(m.contextWindow))
+                    .fontSize(10)
+                    .fontColor($r('app.color.text_tertiary'))
+                }
+              }
+              .width('100%')
+              .padding({ left: 14, right: 14, top: 12, bottom: 12 })
+              .onClick(() => {
+                this.onSwitchModelById(this.sheetProviderProviderId(), m.modelId,
+                  m.contextWindow, m.thoughtLevels);
+                this.modelSheetShow = false;
+              })
+            }
+          }, (m: ModelEntry) => m.modelId)
+        }
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .padding({ left: 10, right: 10, bottom: 16 })
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor($r('app.color.bg_page'))
   }
 
   /** 用模型注册表标称窗口覆盖 session 层分母（若视图已加载且能匹配当前模型） */
@@ -670,13 +779,12 @@ struct SessionPage {
   /** 按注册表视图切换模型（providerId/modelId） */
   private onSwitchModelById(providerId: string, modelId: string, contextWindow: number,
     thoughtLevels: Array<string>): void {
-    const value = providerId + '/' + modelId;
     this.sending = true;
-    this.service.setModel(this.taskId, this.workspacePath, value)
+    // 与桌面一致：切模型附带该模型的默认思考档位
+    const level = thoughtLevels.length > 0 ? thoughtLevels[thoughtLevels.length - 1] : '';
+    this.service.setModel(this.taskId, this.workspacePath, providerId, modelId, level)
       .then(() => {
         promptAction.showToast({ message: '模型已切换: ' + modelId, duration: 1500 });
-        // 同步切换到该模型默认思考档位（取其级别列表的 max/末位，与桌面默认行为一致）
-        const level = thoughtLevels.length > 0 ? thoughtLevels[thoughtLevels.length - 1] : '';
         if (level.length > 0) {
           return this.service.setThoughtLevel(this.taskId, this.workspacePath, level);
         }
@@ -698,8 +806,14 @@ struct SessionPage {
   }
 
   private onSwitchModel(opt: ModelOption): void {
-    const thought = opt.defaultThoughtLevel;
-    this.service.setModel(this.taskId, this.workspacePath, opt.value)
+    // value 形如 providerId/modelId$thought —— 拆为对象
+    const dollar = opt.value.lastIndexOf('$');
+    const base = dollar > 0 ? opt.value.substring(0, dollar) : opt.value;
+    const thought = dollar > 0 ? opt.value.substring(dollar + 1) : opt.defaultThoughtLevel;
+    const slash = base.lastIndexOf('/');
+    const providerId = slash > 0 ? base.substring(0, slash) : base;
+    const modelId = slash > 0 ? base.substring(slash + 1) : base;
+    this.service.setModel(this.taskId, this.workspacePath, providerId, modelId, thought)
       .then(() => {
         promptAction.showToast({ message: '模型已切换: ' + opt.name, duration: 1500 });
         if (thought.length > 0) {
@@ -791,6 +905,14 @@ struct SessionPage {
       .catch((e: Error) => {
         promptAction.showToast({ message: '操作失败: ' + e.message, duration: 2500 });
       });
+  }
+
+  private sheetModels(): Array<ModelEntry> {
+    return this.sheetProvider !== undefined ? this.sheetProvider.models : new Array<ModelEntry>();
+  }
+
+  private sheetProviderProviderId(): string {
+    return this.sheetProvider !== undefined ? this.sheetProvider.providerId : '';
   }
 
   private statusText(): string {

@@ -834,10 +834,18 @@ export class ZcodeService {
     return out;
   }
 
-  /** 切换模型 */
-  async setModel(taskId: string, workspacePath: string, model: string): Promise<void> {
+  /** 切换模型（model 为 {providerId, modelId, options?} 对象，与桌面 modelSelection 同构） */
+  async setModel(taskId: string, workspacePath: string, providerId: string,
+    modelId: string, reasoningLevel: string): Promise<void> {
     await this.agentSessionCall(taskId, workspacePath, 'setModel', (args: Record<string, Object>): void => {
-      args['model'] = model;
+      const selection: Record<string, Object> = {
+        'providerId': providerId,
+        'modelId': modelId
+      };
+      if (reasoningLevel.length > 0) {
+        selection['options'] = { 'reasoningLevel': reasoningLevel } as Record<string, Object>;
+      }
+      args['model'] = selection;
       args['persistAsWorkspaceLastUsed'] = true;
     });
   }
