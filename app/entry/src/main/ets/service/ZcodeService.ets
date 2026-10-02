@@ -5,7 +5,8 @@ import { FrameIdentity } from '../protocol/FrameCodec';
 import { RelayClient, STATE_CLOSED, STATE_ERROR, STATE_PAIRED } from '../protocol/RelayClient';
 import { jArr, jNum, jRec, jStr, jBool, parseObj } from '../protocol/Json';
 import { BindingInfo, SnapshotResult, SnapshotRuntime, SessionMetaInfo, ModelConfig, ModelOption,
-  ModelSelectionView, ModelProviderGroup, ModelEntry,
+  ModelSelectionView, ModelProviderGroup, ModelEntry, EntitlementSnapshot, EntitlementLimit,
+  pickLimit,
   TaskItem, TaskGroup, WorkspaceItem, ChatMessage, ContentPart, ToolCall,
   PermissionRequest, PermissionOption, ElicitationRequest,
   THOUGHT_MAX, TOOL_OUTPUT_MAX, TOOL_INPUT_MAX, truncateText, genClientId } from '../model/Models';
@@ -171,6 +172,11 @@ export class ZcodeService {
       return;
     }
     if (zt === 'workspace-bridge-ready') {
+      if (this.pendingBridge === undefined && this.bridge === undefined) {
+        // 兜底：open 的等待方已超时/被清理，但桌面桥已打开——直接接住，避免帧泄漏
+        this.onBridgeReady(payload);
+        return;
+      }
       this.onBridgeReady(payload);
       return;
     }
@@ -573,16 +579,16 @@ export class ZcodeService {
 
   private onBridgeReady(payload: Record<string, Object>): void {
     const sid = jStr(payload, 'bridgeSessionId');
-    if (this.pendingBridge === undefined || this.pendingBridge.bridgeSessionId !== sid) {
-      return;
-    }
     const bridgeRec = jRec(payload, 'bridge');
-    const p = this.pendingBridge;
-    this.pendingBridge = undefined;
     if (bridgeRec === undefined) {
-      p.reject(new Error('桥响应缺少 bridge 字段'));
+      if (this.pendingBridge !== undefined && this.pendingBridge.bridgeSessionId === sid) {
+        const p0 = this.pendingBridge;
+        this.pendingBridge = undefined;
+        p0.reject(new Error('桥响应缺少 bridge 字段'));
+      }
       return;
     }
+    // 构造桥（无论是否有 pendingBridge 等待——桌面桥已打开，必须接管）
     const identity = new FrameIdentity(
       sid,
       jNum(payload, 'bridgeGeneration') > 0 ? jNum(payload, 'bridgeGeneration') : 1,
@@ -606,7 +612,19 @@ export class ZcodeService {
         this.notify();
       }
     };
-    p.resolve(bridge);
+    const previous = this.bridge;
+    this.bridge = bridge;
+    if (this.pendingBridge !== undefined && this.pendingBridge.bridgeSessionId === sid) {
+      const p = this.pendingBridge;
+      this.pendingBridge = undefined;
+      p.resolve(bridge);
+    } else {
+      hilog.info(0x0000, TAG, '[svc] bridge adopted without pending waiter (%{public}s)', sid);
+    }
+    if (previous !== undefined && previous !== bridge) {
+      // 顶掉旧桥：释放其回调引用
+      previous.onTransportDown();
+    }
   }
 
   private closeBridgeSession(): void {
@@ -741,6 +759,66 @@ export class ZcodeService {
     return view;
   }
 
+  /**
+   * 拉取渠道额度快照（5 小时/每周积分或 token 额度、重置时间）。
+   * preferredProviderId 从 model-selection 视图取；accountAccess 按 providerId 推导
+   * （host 侧用桌面 OAuth 自行解析，无 token 传输）。
+   */
+  async fetchEntitlement(workspacePath: string, preferredProviderId: string): Promise<EntitlementSnapshot> {
+    const out = new EntitlementSnapshot();
+    if (this.bridge === undefined) {
+      return out;
+    }
+    const args: Record<string, Object> = {
+      'includeSubscription': false,
+      'preferredProviderId': preferredProviderId,
+      'accountAccess': { 'type': 'zhipu-account', 'family': 'bigmodel', 'planKind': 'individual-coding-plan' } as Record<string, Object>
+    };
+    if (preferredProviderId.includes('start-plan')) {
+      args['accountAccess'] = { 'type': 'zhipu-account', 'family': 'bigmodel', 'planKind': 'start-plan' } as Record<string, Object>;
+    }
+    const argArray: Array<Object> = [args];
+    try {
+      const dataJson = await this.bridge.channel.request('usage-stats', 'getEntitlementSnapshot',
+        JSON.stringify(argArray), 20000);
+      const data = parseObj(dataJson);
+      if (data === undefined) {
+        return out;
+      }
+      out.unavailableReason = jStr(data, 'unavailableReason');
+      const quota = jRec(data, 'quota');
+      if (quota === undefined) {
+        return out;
+      }
+      const limArr = jArr(quota, 'limits');
+      for (const l of limArr) {
+        const lrec = jRec({ 'v': l } as Record<string, Object>, 'v');
+        if (lrec === undefined) {
+          continue;
+        }
+        const item = new EntitlementLimit();
+        item.type = jStr(lrec, 'type');
+        item.unit = jNum(lrec, 'unit');
+        item.number = jNum(lrec, 'number');
+        item.currentValue = jNum(lrec, 'currentValue');
+        item.limit = jNum(lrec, 'limit');
+        item.remaining = jNum(lrec, 'remaining');
+        item.percentage = jNum(lrec, 'percentage');
+        item.nextResetTime = jNum(lrec, 'nextResetTime');
+        out.limits.push(item);
+      }
+      out.fiveHour = pickLimit(out.limits, 'TOKENS_LIMIT', 3, 5);
+      out.weekly = pickLimit(out.limits, 'TOKENS_LIMIT', 6, 0);
+      out.available = out.limits.length > 0;
+    } catch (e) {
+      hilog.warn(0x0000, TAG, '[svc] entitlement failed: %{public}s',
+        e instanceof Error ? (e as Error).message : '?');
+    }
+    hilog.info(0x0000, TAG, '[svc] entitlement: available=%{public}s limits=%{public}d reason=%{public}s',
+      String(out.available), out.limits.length, out.unavailableReason);
+    return out;
+  }
+
   /** 切换模型 */
   async setModel(taskId: string, workspacePath: string, model: string): Promise<void> {
     await this.agentSessionCall(taskId, workspacePath, 'setModel', (args: Record<string, Object>): void => {
@@ -839,13 +917,18 @@ export class ZcodeService {
     });
   }
 
-  /** 用户输入问答回复: accept（采用 content）/ decline / cancel */
+  /**
+   * 用户输入问答回复（与网页端一致）：
+   * 选择选项 → answer:{optionId}；自由文本 → answer:{freeText}
+   */
   async respondElicitation(taskId: string, workspacePath: string, requestId: string,
-    action: string, content: string): Promise<void> {
+    optionId: string, freeText: string): Promise<void> {
     await this.sendConversationCommand(taskId, workspacePath, 'elicitation', requestId, () => {
-      const answer: Record<string, Object> = { 'action': action };
-      if (content.length > 0) {
-        answer['content'] = content;
+      const answer: Record<string, Object> = {};
+      if (freeText.length > 0) {
+        answer['freeText'] = freeText;
+      } else {
+        answer['optionId'] = optionId;
       }
       const payload: Record<string, Object> = {
         'interactionId': requestId,
@@ -1188,7 +1271,10 @@ function parseSnapshotRuntime(snapshot: Record<string, Object>): SnapshotRuntime
         continue;
       }
       const opt = new PermissionOption();
-      opt.optionId = jStr(orec, 'value');
+      opt.optionId = jStr(orec, 'optionId');
+      if (opt.optionId.length === 0) {
+        opt.optionId = jStr(orec, 'value');
+      }
       opt.label = jStr(orec, 'label');
       if (opt.label.length === 0) {
         opt.label = jStr(orec, 'value');
@@ -1196,6 +1282,14 @@ function parseSnapshotRuntime(snapshot: Record<string, Object>): SnapshotRuntime
       if (opt.optionId.length > 0) {
         item.options.push(opt);
       }
+    }
+    // freeText 标志在 schema（interaction === 'free_text'）或原始字段
+    const schema = jRec(prec, 'schema');
+    if (schema !== undefined && jStr(schema, 'interaction') === 'free_text') {
+      item.freeText = true;
+    }
+    if (jBool(prec, 'freeText')) {
+      item.freeText = true;
     }
     if (item.requestId.length > 0) {
       rt.pendingElicitations.push(item);

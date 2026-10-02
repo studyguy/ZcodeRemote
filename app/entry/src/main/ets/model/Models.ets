@@ -162,6 +162,8 @@ export class ElicitationRequest {
   header: string = '';
   options: Array<PermissionOption> = new Array<PermissionOption>();
   multiSelect: boolean = false;
+  /** schema.interaction === 'free_text' 时可用自由文本回答 */
+  freeText: boolean = false;
 }
 
 /** 会话运行时状态（快照 runtime） */
@@ -237,12 +239,73 @@ export class ModelConfig {
   }
 }
 
+/** 渠道额度项（usage-stats.getEntitlementSnapshot 的 quota.limits 项） */
+export class EntitlementLimit {
+  type: string = '';
+  unit: number = 0;
+  number: number = 0;
+  currentValue: number = 0;
+  limit: number = 0;
+  remaining: number = 0;
+  percentage: number = -1;
+  nextResetTime: number = 0;
+}
+
+/** 渠道额度快照 */
+export class EntitlementSnapshot {
+  limits: Array<EntitlementLimit> = new Array<EntitlementLimit>();
+  /** 5 小时额度（unit=3, number=5；TOKENS/CREDIT 等价） */
+  fiveHour: EntitlementLimit | undefined = undefined;
+  /** 每周额度（unit=6；TOKENS/CREDIT 等价） */
+  weekly: EntitlementLimit | undefined = undefined;
+  available: boolean = false;
+  unavailableReason: string = '';
+}
+
 /** 生成客户端唯一 id（commandId/inputId 用） */
 export function genClientId(): string {
   const rnd = (): string => {
     return Math.floor(Math.random() * 0xffff).toString(16).padStart(4, '0');
   };
   return `app-${Date.now().toString(36)}${rnd()}${rnd()}${rnd()}`;
+}
+
+/** 额度类型等价判定（CREDIT 与 TOKENS 互为等价类） */
+export function limitTypeMatch(a: string, b: string): boolean {
+  if (a === b) {
+    return true;
+  }
+  const credit: Array<string> = ['CREDIT_LIMIT', 'TOKENS_LIMIT'];
+  return credit.includes(a) && credit.includes(b);
+}
+
+/** 按桌面规则选额度项（type 等价 + unit 匹配 + number 可选匹配） */
+export function pickLimit(limits: Array<EntitlementLimit>, type: string, unit: number,
+  number: number): EntitlementLimit | undefined {
+  for (const l of limits) {
+    if (!limitTypeMatch(l.type, type) || l.unit !== unit) {
+      continue;
+    }
+    if (number > 0 && l.number !== number) {
+      continue;
+    }
+    return l;
+  }
+  return undefined;
+}
+
+/** 额度周期名（unit: 3=小时族, 6=周, 5=月；number 为窗口小时/个数） */
+export function limitPeriodLabel(l: EntitlementLimit): string {
+  if (l.unit === 6) {
+    return '每周额度';
+  }
+  if (l.unit === 5) {
+    return '每月额度';
+  }
+  if (l.unit === 3) {
+    return l.number > 0 ? `${l.number} 小时额度` : '小时额度';
+  }
+  return l.type === 'TIME_LIMIT' ? '时间额度' : 'Token 额度';
 }
 
 /** token 数紧凑格式化（与桌面端一致: 12k / 1.2M） */

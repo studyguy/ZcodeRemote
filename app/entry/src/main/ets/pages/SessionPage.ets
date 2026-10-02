@@ -2,6 +2,7 @@ import { promptAction, router } from '@kit.ArkUI';
 import { ChatMessage, ContentPart, ToolCall, SnapshotRuntime, PermissionRequest,
   PermissionOption, ElicitationRequest, ModelOption, ModelConfig, SessionMetaInfo,
   ModelSelectionView, ModelProviderGroup, ModelEntry,
+  EntitlementSnapshot, EntitlementLimit, limitTypeMatch, limitPeriodLabel,
   formatTime, statusKind, formatTokens, modeLabel } from '../model/Models';
 import { AppError } from '../model/AppError';
 import { ZcodeService } from '../service/ZcodeService';
@@ -22,6 +23,7 @@ struct SessionPage {
   @State meta: SessionMetaInfo = new SessionMetaInfo();
   @State config: ModelConfig = new ModelConfig();
   @State modelView: ModelSelectionView = new ModelSelectionView();
+  @State entitlement: EntitlementSnapshot = new EntitlementSnapshot();
   @State sending: boolean = false;
   private service: ZcodeService = ZcodeService.getInstance();
   private taskId: string = '';
@@ -94,6 +96,7 @@ struct SessionPage {
       await this.pollOnce(true);
       this.startPolling();
       this.refreshModelView();
+      this.refreshEntitlement();
     } catch (e) {
       this.loadError = e instanceof Error ? (e as Error).message : '打开会话失败';
       this.loading = false;
@@ -105,10 +108,87 @@ struct SessionPage {
     this.service.fetchModelSelectionView(this.workspacePath)
       .then((view: ModelSelectionView) => {
         this.modelView = view;
+        // 视图就绪后拉额度（需要 preferredProviderId）
+        this.refreshEntitlement();
       })
       .catch((e: Error) => {
         // 视图获取失败不影响主流程，模型菜单回退 configOptions
       });
+  }
+
+  /** 拉取渠道额度（5 小时/每周），失败静默（状态条不显示额度项） */
+  private refreshEntitlement(): void {
+    const providerId = this.currentProviderId();
+    if (providerId.length === 0) {
+      return;
+    }
+    this.service.fetchEntitlement(this.workspacePath, providerId)
+      .then((snap: EntitlementSnapshot) => {
+        this.entitlement = snap;
+      })
+      .catch((e: Error) => {
+        // 静默：额度是辅助信息
+      });
+  }
+
+  private currentProviderId(): string {
+    const model = this.meta.model;
+    const slash = model.lastIndexOf('/');
+    return slash > 0 ? model.substring(0, slash) : '';
+  }
+
+  /** 额度菜单标签（5 小时/每周） */
+  private entitlementLabel(l: EntitlementLimit): string {
+    const period = limitPeriodLabel(l);
+    let usage: string;
+    if (l.percentage >= 0) {
+      usage = `已用 ${Math.min(100, Math.max(0, Math.round(l.percentage)))}%`;
+    } else if (l.limit > 0) {
+      usage = `已用 ${formatTokens(l.currentValue)}/${formatTokens(l.limit)}`;
+    } else {
+      usage = `剩余 ${formatTokens(l.remaining)}`;
+    }
+    let reset = '';
+    if (l.nextResetTime > 0) {
+      const d = new Date(l.nextResetTime);
+      const p = (n: number): string => {
+        return n < 10 ? `0${n}` : `${n}`;
+      };
+      reset = ` · ${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())} 重置`;
+    }
+    return `${period}：${usage}${reset}`;
+  }
+
+  private buildEntitlementMenu(): Array<MenuElement> {
+    const items: Array<MenuElement> = [];
+    items.push({
+      value: '── 渠道额度 ──',
+      action: (): void => {
+      }
+    });
+    if (!this.entitlement.available) {
+      items.push({
+        value: this.entitlement.unavailableReason.length > 0
+          ? `暂不可用（${this.entitlement.unavailableReason}）` : '暂无额度数据',
+        action: (): void => {
+        }
+      });
+      return items;
+    }
+    for (const l of this.entitlement.limits) {
+      items.push({
+        value: this.entitlementLabel(l),
+        action: (): void => {
+          this.refreshEntitlement();
+        }
+      });
+    }
+    items.push({
+      value: '（点击条目刷新）',
+      action: (): void => {
+      }
+    });
+    return items;
   }
 
   private startPolling(): void {
@@ -160,8 +240,8 @@ struct SessionPage {
         this.loadError = err.display() + ` —— 已连续失败 ${this.failCount} 次，自动刷新已暂停`;
         return;
       }
-      if (!first) {
-        // 桥可能已坏：强制关闭，下次轮询重建
+      if (!first && this.failCount === 1) {
+        // 仅首次失败时重建桥一次（后续交给退避与手动重试，避免与 ready 竞态）
         this.bridge = undefined;
         this.service.forceReopenBridge();
       }
@@ -256,6 +336,12 @@ struct SessionPage {
 
         Blank()
 
+        if (this.entitlement.available) {
+          Text('⚡ ' + this.entitlementBadge())
+            .fontSize(10)
+            .fontColor(this.entitlementColor())
+            .bindMenu(this.buildEntitlementMenu())
+        }
         if (this.config.options.length > 0) {
           Text(this.modelLabel())
             .fontSize(10)
@@ -357,8 +443,9 @@ struct SessionPage {
             header: el.header,
             message: el.message,
             options: el.options,
-            onAnswer: (action: string, content: string) => {
-              this.onRespondElicitation(el.requestId, action, content);
+            freeTextEnabled: el.freeText,
+            onAnswer: (optionId: string, freeText: string) => {
+              this.onRespondElicitation(el.requestId, optionId, freeText);
             }
           })
         }, (el: ElicitationRequest) => el.requestId + el.options.length.toString())
@@ -397,6 +484,36 @@ struct SessionPage {
         }
       }
     }
+  }
+
+  private entitlementBadge(): string {
+    const l = this.entitlement.fiveHour !== undefined ? this.entitlement.fiveHour
+      : (this.entitlement.weekly !== undefined ? this.entitlement.weekly
+        : (this.entitlement.limits.length > 0 ? this.entitlement.limits[0] : undefined));
+    if (l === undefined) {
+      return '';
+    }
+    if (l.percentage >= 0) {
+      return Math.round(100 - Math.min(100, Math.max(0, l.percentage))) + '%';
+    }
+    return formatTokens(l.remaining);
+  }
+
+  private entitlementColor(): ResourceColor {
+    const l = this.entitlement.fiveHour !== undefined ? this.entitlement.fiveHour
+      : (this.entitlement.weekly !== undefined ? this.entitlement.weekly
+        : (this.entitlement.limits.length > 0 ? this.entitlement.limits[0] : undefined));
+    if (l === undefined) {
+      return $r('app.color.text_secondary');
+    }
+    const used = l.percentage >= 0 ? l.percentage : (l.limit > 0 ? l.currentValue / l.limit * 100 : 0);
+    if (used >= 90) {
+      return $r('app.color.state_bad');
+    }
+    if (used >= 70) {
+      return $r('app.color.state_warn');
+    }
+    return $r('app.color.state_ok');
   }
 
   private ctxPercent(): number {
@@ -664,8 +781,8 @@ struct SessionPage {
       });
   }
 
-  private onRespondElicitation(requestId: string, action: string, content: string): void {
-    this.service.respondElicitation(this.taskId, this.workspacePath, requestId, action, content)
+  private onRespondElicitation(requestId: string, optionId: string, freeText: string): void {
+    this.service.respondElicitation(this.taskId, this.workspacePath, requestId, optionId, freeText)
       .then(() => {
         this.stickBottom = true;
         this.forceFollow = true;
@@ -1097,7 +1214,8 @@ struct ElicitationCardView {
   @Prop header: string;
   @Prop message: string;
   @Prop options: Array<PermissionOption>;
-  onAnswer: (action: string, content: string) => void = (action: string, content: string) => {
+  @Prop freeTextEnabled: boolean;
+  onAnswer: (optionId: string, freeText: string) => void = (optionId: string, freeText: string) => {
   };
   @State freeText: string = '';
 
@@ -1121,7 +1239,7 @@ struct ElicitationCardView {
           .width('100%')
       }
 
-      // 选项按钮（含自由输入时的"用此文本回答"）
+      // 选项按钮 → answer:{optionId}
       if (this.options.length > 0) {
         Column({ space: 6 }) {
           ForEach(this.options, (opt: PermissionOption) => {
@@ -1132,58 +1250,39 @@ struct ElicitationCardView {
               .backgroundColor($r('app.color.btn_secondary_bg'))
               .fontColor($r('app.color.text_primary'))
               .onClick(() => {
-                this.onAnswer('accept', opt.optionId);
+                this.onAnswer(opt.optionId, '');
               })
           }, (opt: PermissionOption) => opt.optionId + opt.label)
         }
         .width('100%')
       }
 
-      // 自由文本输入 + 提交（无选项时是唯一入口；有选项时也可补充回答）
-      Row({ space: 8 }) {
-        TextInput({ placeholder: '自定义回答…', text: this.freeText })
-          .fontSize(13)
-          .fontColor($r('app.color.text_primary'))
-          .placeholderColor($r('app.color.text_tertiary'))
-          .backgroundColor($r('app.color.bg_input'))
-          .borderRadius(18)
-          .height(36)
-          .layoutWeight(1)
-          .onChange((v: string) => {
-            this.freeText = v;
-          })
-        Button(this.options.length > 0 ? '发送' : '提交')
-          .fontSize(13)
-          .height(36)
-          .backgroundColor($r('app.color.accent'))
-          .fontColor(Color.White)
-          .enabled(this.freeText.trim().length > 0)
-          .onClick(() => {
-            this.onAnswer('accept', this.freeText.trim());
-          })
+      // 自由文本 → answer:{freeText}（仅 schema 标记 free_text 的问答显示）
+      if (this.freeTextEnabled || this.options.length === 0) {
+        Row({ space: 8 }) {
+          TextInput({ placeholder: '输入回答…', text: this.freeText })
+            .fontSize(13)
+            .fontColor($r('app.color.text_primary'))
+            .placeholderColor($r('app.color.text_tertiary'))
+            .backgroundColor($r('app.color.bg_input'))
+            .borderRadius(18)
+            .height(36)
+            .layoutWeight(1)
+            .onChange((v: string) => {
+              this.freeText = v;
+            })
+          Button('提交')
+            .fontSize(13)
+            .height(36)
+            .backgroundColor($r('app.color.accent'))
+            .fontColor(Color.White)
+            .enabled(this.freeText.trim().length > 0)
+            .onClick(() => {
+              this.onAnswer('', this.freeText.trim());
+            })
+        }
+        .width('100%')
       }
-      .width('100%')
-
-      // 拒绝/取消（有选项或有问题时提供）
-      Row({ space: 8 }) {
-        Button('拒绝')
-          .fontSize(12)
-          .height(30)
-          .backgroundColor($r('app.color.btn_danger_bg'))
-          .fontColor($r('app.color.btn_danger_text'))
-          .onClick(() => {
-            this.onAnswer('decline', '');
-          })
-        Button('取消')
-          .fontSize(12)
-          .height(30)
-          .backgroundColor($r('app.color.btn_secondary_bg'))
-          .fontColor($r('app.color.text_secondary'))
-          .onClick(() => {
-            this.onAnswer('cancel', '');
-          })
-      }
-      .width('100%')
     }
     .width('100%')
     .padding(10)
