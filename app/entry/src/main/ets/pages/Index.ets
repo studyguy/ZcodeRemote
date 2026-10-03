@@ -24,6 +24,12 @@ struct Index {
   private listener: (() => void) | undefined = undefined;
 
   aboutToAppear(): void {
+    // 键盘避让改 RESIZE：键盘弹出压缩页面高度（顶栏留在原位，只压缩列表与输入区）
+    try {
+      this.getUIContext().setKeyboardAvoidMode(1); // KeyboardAvoidMode.RESIZE
+    } catch (e) {
+      // ignore
+    }
     this.bound = this.service.bound;
     this.connState = this.service.connState;
     this.connDetail = this.service.connDetail;

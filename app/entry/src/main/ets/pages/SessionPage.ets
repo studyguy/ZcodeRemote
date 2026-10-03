@@ -52,6 +52,7 @@ struct SessionPage {
   @State openMap: Record<string, boolean> = {} as Record<string, boolean>;
   @StorageProp('statusBarHeight') statusBarHeight: number = 0;
   @StorageProp('navBarHeight') navBarHeight: number = 0;
+  @StorageProp('keyboardHeight') keyboardHeight: number = 0;
   private serviceListener: (() => void) | undefined = undefined;
 
   aboutToAppear(): void {
@@ -426,6 +427,18 @@ struct SessionPage {
           // 可视末项到达最后一条消息（或提示行）即认为在底部
           this.stickBottom = last >= this.dataSource.totalCount() - 1;
         })
+        .onAreaChange((oldArea: Area, newArea: Area) => {
+          // 键盘弹出压缩列表时保持跟随最新消息
+          if (this.stickBottom) {
+            setTimeout(() => {
+              try {
+                this.scroller.scrollEdge(Edge.Bottom);
+              } catch (e) {
+                // ignore
+              }
+            }, 50);
+          }
+        })
       }
 
       // ===== 底部操作区: 队列卡片 + 审批卡片 + 停止按钮 + 输入框 =====
@@ -496,7 +509,12 @@ struct SessionPage {
         })
       }
       .width('100%')
-      .padding({ left: 10, right: 10, top: 4, bottom: this.navBarHeight + 6 })
+      .padding({
+        left: 10,
+        right: 10,
+        top: 4,
+        bottom: this.keyboardHeight > 0 ? this.keyboardHeight : this.navBarHeight + 6
+      })
       .backgroundColor($r('app.color.bg_page'))
     }
     .width('100%')

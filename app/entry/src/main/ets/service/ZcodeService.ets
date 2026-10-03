@@ -907,26 +907,35 @@ export class ZcodeService {
     hilog.info(0x0000, TAG, '[svc] agentSessionCall %{public}s ok (session=%{public}s)', method, taskId);
   }
 
-  /** 发送用户消息到任务会话（走 zcode-agent.sendPrompt → session/send） */
+  /**
+   * 发送用户消息（与桌面 facade 一致）：走 sendConversationCommandV4 的 sendText 信封，
+   * payload 带 heldQueueDisposition:"keepQueueAndSend" —— 任务忙时自动进入队列。
+   */
   async sendMessage(taskId: string, workspacePath: string, text: string): Promise<void> {
     if (this.bridge === undefined) {
-      return await Promise.reject(new Error('桥未就绪'));
+      return await Promise.reject(new AppError(ERR_NOT_CONNECTED, '未连接到桌面端', '请检查网络后重试'));
     }
+    const payload: Record<string, Object> = {
+      'text': text,
+      'heldQueueDisposition': 'keepQueueAndSend'
+    };
+    const envelope: Record<string, Object> = {
+      'type': 'sendText',
+      'payload': payload,
+      'sessionId': taskId
+    };
     const args: Record<string, Object> = {
       'workspacePath': workspacePath,
-      'sessionId': taskId,
-      'inputId': genClientId(),
-      'content': text,
-      'clientMode': 'web-remote-replayable'
+      'envelope': envelope
     };
     const identity = this.workspaceIdentityOf(workspacePath);
     if (identity.length > 0) {
       args['workspaceIdentity'] = identity;
     }
     const argArray: Array<Object> = [args];
-    await this.bridge.channel.request('zcode-agent', 'sendPrompt',
+    await this.bridge.channel.request('zcode-agent', 'sendConversationCommandV4',
       JSON.stringify(argArray), 30000);
-    hilog.info(0x0000, TAG, '[svc] message sent to %{public}s len=%{public}d', taskId, text.length);
+    hilog.info(0x0000, TAG, '[svc] message sent (sendText) to %{public}s len=%{public}d', taskId, text.length);
   }
 
   /** 中断当前回合 */

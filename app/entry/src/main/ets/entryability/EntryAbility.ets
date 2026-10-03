@@ -80,6 +80,8 @@ export default class EntryAbility extends UIAbility {
         mainWin.on('windowSizeChange', () => {
           this.publishAvoidAreaHeights(mainWin);
         });
+        // 键盘避让模式（RESIZE：压缩页面而非上抬整页）由 Index 页面 aboutToAppear 设置
+        // （setKeyboardAvoidMode 在 UIContext 上，Ability 上下文不可用）
       });
     });
   }
