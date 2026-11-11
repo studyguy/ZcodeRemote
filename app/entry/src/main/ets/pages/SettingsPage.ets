@@ -1,72 +1,125 @@
-import { promptAction, router } from '@kit.ArkUI';
-import { ConfigurationConstant } from '@kit.AbilityKit';
+import { promptAction, router, window } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
-import { ZcodeService } from '../service/ZcodeService';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BindingStore } from '../store/BindingStore';
+import { BindingInfo } from '../model/Models';
 
+const TAG: string = 'ZCRemote';
+
+/**
+ * 设置与设备管理（壳优先重构 2026-11-11 简版）：
+ * 电脑列表（当前✓/切换/移除）、扫码添加、防截屏、解绑全部。
+ * 数据全部来自 BindingStore；返回 WebStage 后由其自行的绑定读取生效（切换设备后
+ * 用户从胶囊菜单重新进入网页即可，或直接返回时 WebStage 仍持有旧 URL——切换动作
+ * 同时会提示用户）。
+ */
 @Entry
 @Component
 struct SettingsPage {
-  @State deviceName: string = '';
-  @State sidSuffix: string = '';
-  @State desktopVersion: string = '';
-  @State connState: string = '';
-  @State colorModePref: string = 'system';
-  @State endpoint: string = 'wss://zcode.z.ai/ws';
-  private service: ZcodeService = ZcodeService.getInstance();
-  private listener: (() => void) | undefined = undefined;
+  @State devices: Array<BindingInfo> = [];
+  @State currentSid: string = '';
+  @State privacyOn: boolean = false;
   @StorageProp('statusBarHeight') statusBarHeight: number = 0;
-  @StorageProp('navBarHeight') navBarHeight: number = 0;
 
   aboutToAppear(): void {
     this.refresh();
-    this.colorModePref = BindingStore.getColorModePref(getContext(this) as common.UIAbilityContext);
-    const b = this.service.binding;
-    this.endpoint = b !== undefined ? b.relayWsUrl : 'wss://zcode.z.ai/ws';
-    this.listener = () => {
-      this.refresh();
-    };
-    this.service.addListener(this.listener);
   }
 
-  aboutToDisappear(): void {
-    if (this.listener !== undefined) {
-      this.service.removeListener(this.listener);
-      this.listener = undefined;
-    }
+  onPageShow(): void {
+    this.refresh();
   }
 
   private refresh(): void {
-    const b = this.service.binding;
-    this.deviceName = b !== undefined ? b.deviceName : '';
-    this.sidSuffix = b !== undefined && b.deviceSid.length > 6
-      ? b.deviceSid.substring(b.deviceSid.length - 6) : '';
-    this.desktopVersion = this.service.desktopAppVersion;
-    this.connState = this.service.connState;
+    const ctx = getContext(this) as common.UIAbilityContext;
+    BindingStore.load(ctx).then((active) => {
+      this.currentSid = active !== undefined ? active.deviceSid : '';
+      return BindingStore.loadAll(ctx);
+    }).then((all) => {
+      this.devices = all;
+      this.privacyOn = BindingStore.getPrivacyMode(getContext(this) as common.UIAbilityContext);
+    }).catch(() => {
+      // ignore
+    });
   }
 
-  private applyColorMode(pref: string): void {
-    this.colorModePref = pref;
-    BindingStore.setColorModePref(getContext(this) as common.UIAbilityContext, pref);
-    const appCtx = (getContext(this) as common.UIAbilityContext).getApplicationContext();
-    if (pref === 'light') {
-      appCtx.setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT);
-    } else if (pref === 'dark') {
-      appCtx.setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
-    } else {
-      appCtx.setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
+  private switchDevice(sid: string): void {
+    if (sid === this.currentSid) {
+      return;
     }
-    promptAction.showToast({ message: this.modeLabel(pref), duration: 1200 });
+    const ctx = getContext(this) as common.UIAbilityContext;
+    BindingStore.setActive(ctx, sid).then((info) => {
+      if (info !== undefined) {
+        promptAction.showToast({ message: `已切换到 ${info.deviceName}`, duration: 1800 });
+        this.refresh();
+      }
+    }).catch(() => {
+      promptAction.showToast({ message: '切换失败', duration: 1800 });
+    });
   }
 
-  private modeLabel(pref: string): string {
-    if (pref === 'light') {
-      return '日间模式';
+  private togglePrivacy(on: boolean): void {
+    BindingStore.setPrivacyMode(getContext(this) as common.UIAbilityContext, on);
+    this.privacyOn = on;
+    try {
+      const ctx = getContext(this) as common.UIAbilityContext;
+      window.getLastWindow(ctx).then((w) => {
+        w.setWindowPrivacyMode(on).catch(() => {
+          // ignore
+        });
+      }).catch(() => {
+        // ignore
+      });
+    } catch (e) {
+      // ignore
     }
-    if (pref === 'dark') {
-      return '夜间模式';
-    }
-    return '跟随系统';
+    promptAction.showToast({
+      message: on ? '已开启防截屏：截屏/录屏/任务中心预览将被系统遮挡' : '已关闭防截屏',
+      duration: 2200
+    });
+  }
+
+  private removeDevice(sid: string): void {
+    const target = this.devices.find((d: BindingInfo): boolean => d.deviceSid === sid);
+    promptAction.showDialog({
+      title: '移除电脑',
+      message: `将清除「${target !== undefined ? target.deviceName : sid}」的绑定，需要重新扫码。`,
+      buttons: [
+        { text: '取消', color: '#9AA1B5' },
+        { text: '移除', color: '#C0392B' }
+      ]
+    }).then((result) => {
+      if (result.index !== 1) {
+        return;
+      }
+      const ctx = getContext(this) as common.UIAbilityContext;
+      BindingStore.removeDevice(ctx, sid).then(() => {
+        hilog.info(0x0000, TAG, 'settings: device removed sid=%{public}s', sid);
+        this.refresh();
+      }).catch(() => {
+        // ignore
+      });
+    });
+  }
+
+  private unbindAll(): void {
+    promptAction.showDialog({
+      title: '解绑全部电脑',
+      message: '将清除本机所有绑定记录（账号登录态保留），需要重新扫码。',
+      buttons: [
+        { text: '取消', color: '#9AA1B5' },
+        { text: '解绑', color: '#C0392B' }
+      ]
+    }).then((result) => {
+      if (result.index !== 1) {
+        return;
+      }
+      const ctx = getContext(this) as common.UIAbilityContext;
+      BindingStore.clear(ctx).then(() => {
+        router.replaceUrl({ url: 'pages/BindPage' });
+      }).catch(() => {
+        // ignore
+      });
+    });
   }
 
   build() {
@@ -83,80 +136,138 @@ struct SettingsPage {
         .onClick(() => {
           router.back();
         })
-        Text('设置')
-          .fontSize(18)
+        Text('设置与设备管理')
+          .fontSize(17)
           .fontWeight(FontWeight.Bold)
           .fontColor($r('app.color.text_primary'))
           .layoutWeight(1)
       }
       .width('100%')
-      .padding({ left: 12, right: 16, top: this.statusBarHeight + 10, bottom: 14 })
+      .padding({ left: 12, right: 16, top: this.statusBarHeight + 8, bottom: 10 })
 
       Scroll() {
         Column({ space: 12 }) {
-          // 绑定信息卡片
-          Column({ space: 10 }) {
-            Text('绑定信息')
-              .fontSize(14)
+          // 电脑列表
+          Column({ space: 6 }) {
+            Text(`已绑定的电脑 · ${this.devices.length}`)
+              .fontSize(13)
               .fontWeight(FontWeight.Medium)
-              .fontColor($r('app.color.text_primary'))
+              .fontColor($r('app.color.text_secondary'))
               .width('100%')
-            this.infoRow('设备名称', this.deviceName)
-            this.infoRow('配对 ID 尾号', this.sidSuffix)
-            this.infoRow('中继端点', this.endpoint)
-            this.infoRow('桌面端版本', this.desktopVersion.length > 0 ? this.desktopVersion : '未知')
-            this.infoRow('连接状态', this.stateLabel())
+              .padding({ left: 4, top: 2 })
+            if (this.devices.length === 0) {
+              Text('暂无绑定，请扫码添加')
+                .fontSize(12)
+                .fontColor($r('app.color.text_tertiary'))
+                .width('100%')
+                .padding({ left: 4, top: 6, bottom: 6 })
+            }
+            ForEach(this.devices, (d: BindingInfo) => {
+              Row({ space: 10 }) {
+                Text(d.deviceName)
+                  .fontSize(14)
+                  .fontColor($r('app.color.text_primary'))
+                  .layoutWeight(1)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                if (d.deviceSid === this.currentSid) {
+                  Text('✓ 当前')
+                    .fontSize(11)
+                    .fontColor($r('app.color.accent'))
+                } else {
+                  Text('点击切换')
+                    .fontSize(11)
+                    .fontColor($r('app.color.text_secondary'))
+                }
+                Text('移除')
+                  .fontSize(12)
+                  .fontColor($r('app.color.error_text'))
+                  .padding({ left: 10, top: 4, bottom: 4 })
+                  .onClick(() => {
+                    this.removeDevice(d.deviceSid);
+                  })
+              }
+              .width('100%')
+              .padding(12)
+              .borderRadius(12)
+              .backgroundColor($r('app.color.bg_card'))
+              .onClick(() => {
+                this.switchDevice(d.deviceSid);
+              })
+            }, (d: BindingInfo) => {
+              return d.deviceSid;
+            })
+            Button('扫码添加新电脑')
+              .width('100%')
+              .height(42)
+              .backgroundColor($r('app.color.btn_secondary_bg'))
+              .fontColor($r('app.color.accent'))
+              .fontSize(14)
+              .onClick(() => {
+                router.replaceUrl({ url: 'pages/BindPage', params: { 'forceBind': true } as Record<string, Object> });
+              })
           }
-          .padding(14)
+          .alignItems(HorizontalAlign.Start)
+          .padding(10)
           .borderRadius(12)
           .backgroundColor($r('app.color.bg_card'))
           .width('100%')
 
-          // 外观卡片
-          Column({ space: 10 }) {
-            Text('外观')
-              .fontSize(14)
+          // 偏好
+          Column({ space: 8 }) {
+            Text('偏好')
+              .fontSize(13)
               .fontWeight(FontWeight.Medium)
-              .fontColor($r('app.color.text_primary'))
+              .fontColor($r('app.color.text_secondary'))
               .width('100%')
-            Row({ space: 8 }) {
-              this.modeButton('system', '跟随系统')
-              this.modeButton('light', '日间')
-              this.modeButton('dark', '夜间')
+              .padding({ left: 4, top: 2 })
+            Row({ space: 10 }) {
+              Column({ space: 2 }) {
+                Text('防截屏')
+                  .fontSize(14)
+                  .fontColor($r('app.color.text_primary'))
+                Text('开启后本应用画面无法被截屏、录屏或任务中心预览')
+                  .fontSize(10)
+                  .fontColor($r('app.color.text_tertiary'))
+              }
+              .alignItems(HorizontalAlign.Start)
+              .layoutWeight(1)
+              Toggle({ type: ToggleType.Switch, isOn: this.privacyOn })
+                .selectedColor($r('app.color.accent'))
+                .onChange((on: boolean) => {
+                  this.togglePrivacy(on);
+                })
             }
             .width('100%')
+            Text('外观跟随系统（网页内主题由官方网页自行控制）')
+              .fontSize(10)
+              .fontColor($r('app.color.text_tertiary'))
+              .width('100%')
+              .padding({ left: 4 })
           }
-          .padding(14)
+          .alignItems(HorizontalAlign.Start)
+          .padding(10)
           .borderRadius(12)
           .backgroundColor($r('app.color.bg_card'))
           .width('100%')
 
-          Button('重新连接')
-            .width('100%')
-            .height(44)
-            .backgroundColor($r('app.color.btn_secondary_bg'))
-            .fontColor($r('app.color.text_primary'))
-            .onClick(() => {
-              this.service.startConnect();
-              promptAction.showToast({ message: '正在重新连接', duration: 1500 });
-            })
-
-          Button('解绑此设备（重新扫码）')
+          Button('解绑全部电脑')
             .width('100%')
             .height(44)
             .backgroundColor($r('app.color.btn_danger_bg'))
             .fontColor($r('app.color.btn_danger_text'))
             .onClick(() => {
-              this.confirmUnbind();
+              this.unbindAll();
             })
 
-          Text('说明\n· 凭证保存在本机加密存储中，卸载应用后自动失效\n· 若桌面端"重置配对"，需重新扫码绑定\n· 数据经云端中继加密握手（HMAC 挑战-应答）转发')
+          Text('说明\n· 绑定 = 扫码 + 登录同一 ZCode 账号双重校验\n· 登录态与绑定保存在本机，卸载应用后失效\n· 网页业务随官方自动更新，本应用只做宿主增强')
             .fontSize(11)
             .fontColor($r('app.color.text_tertiary'))
             .width('100%')
             .lineHeight(18)
+            .padding({ bottom: 20 })
         }
-        .padding(16)
+        .padding(14)
       }
       .layoutWeight(1)
       .width('100%')
@@ -164,70 +275,5 @@ struct SettingsPage {
     .width('100%')
     .height('100%')
     .backgroundColor($r('app.color.bg_page'))
-
-  }
-
-  @Builder
-  modeButton(pref: string, label: string) {
-    Text(label)
-      .fontSize(13)
-      .fontColor(this.colorModePref === pref ? Color.White : $r('app.color.text_secondary'))
-      .textAlign(TextAlign.Center)
-      .height(34)
-      .layoutWeight(1)
-      .borderRadius(8)
-      .backgroundColor(this.colorModePref === pref ? $r('app.color.accent') : $r('app.color.btn_secondary_bg'))
-      .onClick(() => {
-        this.applyColorMode(pref);
-      })
-  }
-
-  private stateLabel(): string {
-    if (this.connState === 'paired') {
-      return '已连接';
-    }
-    if (this.connState === 'waiting') {
-      return '等待桌面端开启远程控制';
-    }
-    if (this.connState === 'error') {
-      return '错误（凭证可能已失效）';
-    }
-    return this.connState;
-  }
-
-  @Builder
-  infoRow(label: string, value: string) {
-    Row() {
-      Text(label)
-        .fontSize(13)
-        .fontColor($r('app.color.text_secondary'))
-        .width(110)
-      Text(value.length > 0 ? value : '-')
-        .fontSize(13)
-        .fontColor($r('app.color.text_primary'))
-        .layoutWeight(1)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-    }
-    .width('100%')
-  }
-
-  private confirmUnbind(): void {
-    promptAction.showDialog({
-      title: '解绑确认',
-      message: '解绑后需要重新扫码才能连接此电脑。确定解绑？',
-      buttons: [
-        { text: '取消', color: '#9AA1B5' },
-        { text: '确定解绑', color: '#E5697A' }
-      ]
-    }).then((result) => {
-      if (result.index === 1) {
-        this.service.unbind().then(() => {
-          router.back();
-        }).catch((e: Error) => {
-          promptAction.showToast({ message: '解绑失败: ' + e.message, duration: 2500 });
-        });
-      }
-    });
   }
 }

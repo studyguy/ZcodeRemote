@@ -1,7 +1,9 @@
 {
   "src": [
     "pages/Index",
-    "pages/SessionPage",
-    "pages/SettingsPage"
+    "pages/BindPage",
+    "pages/WebStage",
+    "pages/SettingsPage",
+    "pages/LoginWebViewPage"
   ]
 }

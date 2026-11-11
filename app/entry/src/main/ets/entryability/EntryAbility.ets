@@ -1,7 +1,8 @@
-import { UIAbility, Configuration, ConfigurationConstant, errorManager } from '@kit.AbilityKit';
+import { UIAbility, Configuration, ConfigurationConstant, AbilityConstant, Want, errorManager } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 import { display } from '@kit.ArkUI';
+import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { ZcodeService } from '../service/ZcodeService';
 import { BindingStore } from '../store/BindingStore';
 
@@ -10,9 +11,10 @@ const TAG: string = 'ZCRemote';
 export default class EntryAbility extends UIAbility {
   private errorListenerId: number = -1;
 
-  onCreate(): void {
+  onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(0x0000, TAG, 'onCreate');
     ZcodeService.getInstance().setContext(this.context);
+    this.handleDeepLink(want);
     // 全局未捕获异常兜底：记录日志，避免静默崩溃无从排查
     try {
       const observer: errorManager.ErrorObserver = {
@@ -23,6 +25,41 @@ export default class EntryAbility extends UIAbility {
       this.errorListenerId = errorManager.on('error', observer);
     } catch (e) {
       hilog.warn(0x0000, TAG, 'register error observer failed');
+    }
+  }
+
+  onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    this.handleDeepLink(want);
+  }
+
+  onForeground(): void {
+    AppStorage.setOrCreate('appForeground', 1);
+  }
+
+  /** 退后台：申请短时延时保活，尽量让网页连接在后台多存活一会儿（审批提醒可用） */
+  onBackground(): void {
+    AppStorage.setOrCreate('appForeground', 0);
+    try {
+      const info = backgroundTaskManager.requestSuspendDelay('远程网页保活：等待任务确认', () => {
+        hilog.warn(0x0000, TAG, 'suspend delay expiring, web connection may drop');
+      });
+      hilog.info(0x0000, TAG, 'suspend delay id=%{public}s delay=%{public}s',
+        String(info.requestId), String(info.actualDelayTime));
+    } catch (e) {
+      hilog.warn(0x0000, TAG, 'requestSuspendDelay failed');
+    }
+  }
+
+  /** 深度链接：https://…/remote/v4?sid=… 直接进壳完成绑定/切换（点链接免扫码） */
+  private handleDeepLink(want: Want): void {
+    try {
+      const uri = want.uri;
+      if (uri !== undefined && uri.length > 0 && uri.startsWith('https://') && uri.indexOf('/remote/v4?') >= 0) {
+        AppStorage.setOrCreate('pendingBindUrl', uri);
+        hilog.info(0x0000, TAG, 'deep link captured');
+      }
+    } catch (e) {
+      // ignore
     }
   }
 

@@ -2,7 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BridgeSession } from '../protocol/BridgeSession';
 import { FrameIdentity } from '../protocol/FrameCodec';
-import { RelayClient, STATE_CLOSED, STATE_ERROR, STATE_PAIRED } from '../protocol/RelayClient';
+import { RelayClientV2, STATE_CLOSED, STATE_ERROR, STATE_PAIRED } from '../protocol/RelayClientV2';
 import { jArr, jNum, jRec, jStr, jBool, parseObj } from '../protocol/Json';
 import { BindingInfo, SnapshotResult, SnapshotRuntime, SessionMetaInfo, ModelConfig, ModelOption,
   ModelSelectionView, ModelProviderGroup, ModelEntry, EntitlementSnapshot, EntitlementLimit,
@@ -11,6 +11,7 @@ import { BindingInfo, SnapshotResult, SnapshotRuntime, SessionMetaInfo, ModelCon
   PermissionRequest, PermissionOption, ElicitationRequest,
   THOUGHT_MAX, TOOL_OUTPUT_MAX, TOOL_INPUT_MAX, truncateText, genClientId } from '../model/Models';
 import { BindingStore } from '../store/BindingStore';
+import { AuthService } from './AuthService';
 import { AppError, ERR_BRIDGE, ERR_NOT_CONNECTED } from '../model/AppError';
 import { PhoneInfo } from '../model/PhoneInfo';
 
@@ -40,7 +41,7 @@ export class ZcodeService {
   desktopAppVersion: string = '';
   lastError: string = '';
 
-  private relay: RelayClient | undefined = undefined;
+  private relay: RelayClientV2 | undefined = undefined;
   private bridge: BridgeSession | undefined = undefined;
   private ctx: common.UIAbilityContext | undefined = undefined;
   private listeners: Array<() => void> = [];
@@ -72,27 +73,28 @@ export class ZcodeService {
     return this.binding !== undefined;
   }
 
-  /** 应用启动时加载绑定并自动连接 */
+  /** 应用启动时加载绑定与登录态（壳方案重构 2026-11-11：绝不自动启动原生连接——网页是唯一业务通道，原生连接会与网页互踢） */
   async initialize(): Promise<void> {
     if (this.ctx === undefined) {
       return;
     }
+    await AuthService.load(this.ctx);
     const info = await BindingStore.load(this.ctx);
     if (info !== undefined) {
+      info.phoneMid = BindingStore.getOrCreatePhoneMid(this.ctx);
       this.binding = info;
-      this.startConnect();
     }
   }
 
-  /** 保存新绑定并立即连接 */
+  /** 保存新绑定（壳方案：只持久化，不启动原生连接） */
   async bind(info: BindingInfo): Promise<void> {
     if (this.ctx === undefined) {
       return;
     }
     this.closeBridgeSession();
+    info.phoneMid = BindingStore.getOrCreatePhoneMid(this.ctx);
     this.binding = info;
     await BindingStore.save(this.ctx, info);
-    this.startConnect();
   }
 
   async unbind(): Promise<void> {
@@ -113,6 +115,28 @@ export class ZcodeService {
     this.notify();
   }
 
+  /** 仅清内存绑定（WebView 壳多设备"移除当前绑定"用，不动存储） */
+  forgetBinding(): void {
+    this.binding = undefined;
+    this.connState = 'idle';
+    this.connDetail = '';
+    this.notify();
+  }
+
+  /** 账号是否已登录（Index 依此决定进登录页还是直接连接） */
+  loggedIn(): boolean {
+    return AuthService.jwtPresent();
+  }
+
+  /** 保存登录态（LoginWebViewPage 兜底页捕获 JWT 后调用；壳方案不启动原生连接） */
+  async onLoginSuccess(jwt: string): Promise<void> {
+    if (this.ctx === undefined) {
+      return;
+    }
+    await AuthService.saveJwt(this.ctx, jwt);
+    this.notify();
+  }
+
   startConnect(): void {
     if (this.binding === undefined) {
       return;
@@ -120,7 +144,10 @@ export class ZcodeService {
     if (this.relay !== undefined) {
       this.relay.stop();
     }
-    const relay = new RelayClient(this.binding);
+    const origin = this.binding.endpointOrigin;
+    const relay = new RelayClientV2(this.binding, (): Promise<string> => {
+      return AuthService.ensureTerminalToken(origin);
+    });
     this.relay = relay;
     relay.onState = (state: string, detail: string) => {
       this.connState = state;
@@ -298,6 +325,10 @@ export class ZcodeService {
       }
     }
     this.notify();
+    // V2：bootstrap/workspace-list 不再携带任务明细——工作区到位后逐区拉取
+    if (this.connState === STATE_PAIRED) {
+      this.refreshAllTasks();
+    }
   }
 
   /** 找到任务所属工作区路径（含合并进来的独立工作区任务） */
@@ -317,9 +348,11 @@ export class ZcodeService {
   }
 
   /**
-   * 拉取全量任务（含未打开工作区/独立任务）:
-   * listGroupedTaskViewStructure({workspaceScopes:[]}) → topLevelOrders(全量 taskId+workspaceKey)
-   * 对 bootstrap 未覆盖的工作区再 listTasks({workspacePath}) 补元数据，合并重建分组。
+   * 拉取全量任务（V2 协议，2026-11-11）:
+   * 桌面 3.16+ 已删除 listGroupedTaskViewStructure，bootstrap 也不再携带 tasks 字段
+   * （bN schema = {windowControlSessionId, desktopAppVersion, workspaces, ...}）。
+   * V2 全量 = workspace-list 给出的工作区列表 → 逐工作区 zcode-task.listTasks({workspacePath})
+   * （桥只是 RPC 通道，按参数操作任意工作区），合并去重重建分组。
    */
   async refreshAllTasks(): Promise<void> {
     if (this.refreshingAll || this.connState !== STATE_PAIRED) {
@@ -332,79 +365,28 @@ export class ZcodeService {
         bridgeMaybe = await this.ensureBridge(this.defaultWorkspaceKey(), '');
       }
       const bridge: BridgeSession = bridgeMaybe;
-      const structJson = await bridge.channel.request('zcode-task', 'listGroupedTaskViewStructure',
-        JSON.stringify([{ 'workspaceScopes': [] } as Record<string, Object>]), 20000);
-      const viewStruct = parseObj(structJson);
-      if (viewStruct === undefined) {
-        return;
-      }
-      const byWs = new Map<string, Array<string>>();
-      const orders = jArr(viewStruct, 'topLevelOrders');
-      for (const o of orders) {
-        const orec = jRec({ 'v': o } as Record<string, Object>, 'v');
-        if (orec === undefined) {
+      const allTasks: Array<TaskItem> = [];
+      const targets: Array<WorkspaceItem> = this.workspaces.slice();
+      for (const ws of targets) {
+        if (ws.workspacePath.length === 0) {
           continue;
         }
-        const wsKey = jStr(orec, 'workspaceKey');
-        const tid = jStr(orec, 'taskId');
-        if (wsKey.length === 0 || tid.length === 0) {
-          continue;
-        }
-        if (!byWs.has(wsKey)) {
-          byWs.set(wsKey, new Array<string>());
-        }
-        const ids = byWs.get(wsKey);
-        if (ids !== undefined) {
-          ids.push(tid);
-        }
-      }
-      // 找出 bootstrap 未覆盖的工作区
-      const knownTasks = new Set<string>();
-      for (const t of this.tasks) {
-        knownTasks.add(t.taskId);
-      }
-      const missingWs: Array<string> = [];
-      byWs.forEach((ids: Array<string>, wsKey: string) => {
-        let covered: boolean = false;
-        for (const id of ids) {
-          if (knownTasks.has(id)) {
-            covered = true;
-            break;
-          }
-        }
-        if (!covered) {
-          missingWs.push(wsKey);
-        }
-      });
-      if (missingWs.length === 0) {
-        return;
-      }
-      // 逐工作区补元数据
-      const extraTasks: Array<TaskItem> = [];
-      const extraWorkspaces: Array<WorkspaceItem> = [];
-      for (const wsKey of missingWs) {
         try {
+          const arg: Record<string, Object> = { 'workspacePath': ws.workspacePath };
+          if (ws.workspaceKey.length > 0 && ws.workspaceKey !== ws.workspacePath) {
+            arg['workspaceIdentity'] = ws.workspaceKey;
+          }
           const metaJson = await bridge.channel.request('zcode-task', 'listTasks',
-            JSON.stringify([{ 'workspacePath': wsKey } as Record<string, Object>]), 15000);
-          const arrText = metaJson.length > 0 ? metaJson : '[]';
+            JSON.stringify([arg]), 15000);
           let arr: Array<Object> = [];
           try {
-            const parsed: Object = JSON.parse(arrText) as Object;
+            const parsed: Object = JSON.parse(metaJson.length > 0 ? metaJson : '[]') as Object;
             if (Array.isArray(parsed)) {
               arr = parsed as Array<Object>;
             }
           } catch (e) {
             arr = [];
           }
-          if (arr.length === 0) {
-            continue;
-          }
-          const synthesized = new WorkspaceItem();
-          synthesized.workspacePath = wsKey;
-          synthesized.workspaceKey = wsKey;
-          synthesized.label = pathLabel(wsKey);
-          synthesized.kind = 'local';
-          extraWorkspaces.push(synthesized);
           for (const t of arr) {
             const trec = jRec({ 'v': t } as Record<string, Object>, 'v');
             if (trec === undefined) {
@@ -415,6 +397,9 @@ export class ZcodeService {
             }
             const item = new TaskItem();
             item.taskId = jStr(trec, 'taskId');
+            if (item.taskId.length === 0) {
+              continue;
+            }
             item.title = jStr(trec, 'title');
             item.displayStatus = jStr(trec, 'status');
             if (item.displayStatus.length === 0) {
@@ -423,51 +408,28 @@ export class ZcodeService {
             item.updatedAt = jNum(trec, 'updatedAt');
             item.createdAt = jNum(trec, 'createdAt');
             item.pinned = jBool(trec, 'pinned');
-            item.workspaceKey = wsKey;
-            item.workspacePath = wsKey;
-            extraTasks.push(item);
+            item.workspaceKey = ws.workspaceKey;
+            item.workspacePath = ws.workspacePath;
+            allTasks.push(item);
           }
         } catch (e) {
           hilog.warn(0x0000, TAG, '[svc] listTasks %{public}s failed: %{public}s',
-            wsKey, e instanceof Error ? (e as Error).message : '?');
+            ws.workspacePath, e instanceof Error ? (e as Error).message : '?');
         }
       }
-      if (extraTasks.length === 0) {
+      if (allTasks.length === 0 && this.workspaces.length === 0) {
         return;
       }
-      // 合并去重 + 补充 workspaces + 重建分组
-      const merged = this.tasks.slice();
-      for (const t of extraTasks) {
-        let dup: boolean = false;
-        for (const m of merged) {
-          if (m.taskId === t.taskId) {
-            dup = true;
-            break;
-          }
-        }
-        if (!dup) {
-          merged.push(t);
-        }
-      }
-      merged.sort((a: TaskItem, b: TaskItem): number => {
+      allTasks.sort((a: TaskItem, b: TaskItem): number => {
         if (a.pinned !== b.pinned) {
           return a.pinned ? -1 : 1;
         }
         return b.updatedAt - a.updatedAt;
       });
-      this.tasks = merged;
-      const wsKeys = new Set<string>();
-      for (const w of this.workspaces) {
-        wsKeys.add(w.workspaceKey);
-      }
-      for (const w of extraWorkspaces) {
-        if (!wsKeys.has(w.workspaceKey)) {
-          this.workspaces.push(w);
-        }
-      }
+      this.tasks = allTasks;
       this.groups = buildGroups(this.workspaces, this.tasks);
-      hilog.info(0x0000, TAG, '[svc] all tasks merged: total=%{public}d groups=%{public}d extra=%{public}d',
-        this.tasks.length, this.groups.length, extraTasks.length);
+      hilog.info(0x0000, TAG, '[svc] all tasks: total=%{public}d groups=%{public}d workspaces=%{public}d',
+        this.tasks.length, this.groups.length, this.workspaces.length);
       this.notify();
     } catch (e) {
       hilog.warn(0x0000, TAG, '[svc] refreshAllTasks failed: %{public}s',

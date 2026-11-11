@@ -2,7 +2,8 @@ import { BindingInfo } from '../model/Models';
 
 /**
  * 解析 ZCode 桌面端二维码 / 粘贴的绑定链接:
- *   https://zcode.z.ai/remote/v4?sid=...&hash=...&t=...&mid=...&name=...&app_version=...
+ *  - V1 (≤3.14): https://…/remote/v4?sid=…&hash=…&t=…&mid=…&name=…&app_version=…
+ *  - V2 (3.16+): https://…/remote/v4?sid=…&mid=…&name=…&app_version=…（无 hash/t，配对改 sid+桌面端确认）
  */
 export class QrParseResult {
   ok: boolean = false;
@@ -38,12 +39,12 @@ export class QrParser {
     }
     const sid = params.get('sid') !== undefined ? params.get('sid') as string : '';
     const hash = params.get('hash') !== undefined ? params.get('hash') as string : '';
-    if (sid.length === 0 || hash.length === 0) {
-      result.error = '链接缺少 sid/hash 配对凭证';
+    if (sid.length === 0) {
+      result.error = '链接缺少 sid 配对标识';
       return result;
     }
-    // hash 应为 44 位标准 base64（sha256 摘要）
-    if (hash.length < 20) {
+    // V2（桌面 3.16+）二维码不含 hash；V1 的 hash 若存在做基本校验
+    if (hash.length > 0 && hash.length < 20) {
       result.error = 'hash 字段异常';
       return result;
     }
@@ -56,7 +57,6 @@ export class QrParser {
     info.deviceName = name !== undefined && name.length > 0 ? name : '我的电脑';
     const ver = params.get('app_version');
     info.appVersion = ver !== undefined && ver.length > 0 ? ver : '3.14.4';
-    // 端点取自 URL 本体；仅接受 https，防伪造二维码把凭证发往任意服务器
     const schemeEnd = raw.indexOf('://');
     if (schemeEnd <= 0) {
       result.error = '链接缺少协议头';
@@ -67,8 +67,33 @@ export class QrParser {
       result.error = '绑定链接必须为 https（当前: ' + scheme + '），为防凭证泄露已拒绝';
       return result;
     }
-    const originEnd = raw.indexOf('/', schemeEnd + 3);
-    info.endpointOrigin = originEnd > 0 ? raw.substring(0, originEnd) : raw;
+    // 绑定凭证/网页登录态只交给 ZCode 官方主站；不接受仿冒 host、端口或 userinfo。
+    const authorityStart: number = schemeEnd + 3;
+    const authorityEnd: number = raw.indexOf('/', authorityStart);
+    if (authorityEnd <= authorityStart) {
+      result.error = '绑定链接缺少官方远程控制路径';
+      return result;
+    }
+    const authority: string = raw.substring(authorityStart, authorityEnd).toLowerCase();
+    if (authority !== 'zcode.z.ai') {
+      result.error = '仅支持 ZCode 官方域名 zcode.z.ai，为保护账号安全已拒绝';
+      return result;
+    }
+    const pathEndQ: number = raw.indexOf('?', authorityEnd);
+    const pathEndHash: number = raw.indexOf('#', authorityEnd);
+    let pathEnd: number = raw.length;
+    if (pathEndQ >= 0 && pathEndQ < pathEnd) {
+      pathEnd = pathEndQ;
+    }
+    if (pathEndHash >= 0 && pathEndHash < pathEnd) {
+      pathEnd = pathEndHash;
+    }
+    const path: string = raw.substring(authorityEnd, pathEnd).replace(/\/$/, '');
+    if (path !== '/remote/v4') {
+      result.error = '仅支持 ZCode 官方远程控制二维码';
+      return result;
+    }
+    info.endpointOrigin = 'https://zcode.z.ai';
     result.ok = true;
     result.info = info;
     return result;

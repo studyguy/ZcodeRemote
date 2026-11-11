@@ -2,29 +2,58 @@
  * 数据模型（防御式解析中继 JSON 的产物）
  */
 
+/** Index ↔ WebPage 路由参数：url=要加载的绑定链接；forceBind=true 强制落在扫码页（添加/重绑设备） */
+export class WebRouteParams {
+  url: string = '';
+  forceBind: boolean = false;
+
+  constructor(u: string, force: boolean = false) {
+    this.url = u;
+    this.forceBind = force;
+  }
+}
+
 export class BindingInfo {
   deviceSid: string = '';
+  /** V1 遗留字段（V2 无 URL 级机密，恒为空；保留兼容旧存储/死代码引用） */
   passHash: string = '';
   deviceMid: string = '';
   deviceName: string = '';
-  appVersion: string = '3.14.4';
+  appVersion: string = '';
   /** https://zcode.z.ai */
   endpointOrigin: string = 'https://zcode.z.ai';
+  /** 本机中继连接标识（phone_mid，一次生成持久复用；ZcodeService 加载时填充） */
+  phoneMid: string = '';
 
-  /** 由二维码提取的端点派生中继 WebSocket 地址（支持私有化部署） */
+  /** V2 中继 WebSocket 地址（token 以 URL 参数携带，见 RelayClientV2） */
   get relayWsUrl(): string {
     const origin = this.endpointOrigin.replace(/\/$/, '');
     if (origin.startsWith('https://')) {
-      return 'wss://' + origin.substring(8) + '/ws';
+      return 'wss://' + origin.substring(8) + '/api/v1/remote/ws2';
     }
     if (origin.startsWith('http://')) {
-      return 'ws://' + origin.substring(7) + '/ws';
+      return 'ws://' + origin.substring(7) + '/api/v1/remote/ws2';
     }
-    return 'wss://zcode.z.ai/ws';
+    return 'wss://zcode.z.ai/api/v1/remote/ws2';
   }
 
-  get webBaseUrl(): string {
-    return this.endpointOrigin + '/remote/v4';
+  /**
+   * 绑定页面 URL（壳方案 WebStage 加载入口）。
+   * V2 配对无 URL 级机密（配对 = sid + 同账号双重校验），直接由元数据构造。
+   */
+  get boundUrl(): string {
+    const origin = this.endpointOrigin.replace(/\/$/, '');
+    let url = origin + '/remote/v4?sid=' + encodeURIComponent(this.deviceSid);
+    if (this.deviceMid.length > 0) {
+      url += '&mid=' + encodeURIComponent(this.deviceMid);
+    }
+    if (this.deviceName.length > 0) {
+      url += '&name=' + encodeURIComponent(this.deviceName);
+    }
+    if (this.appVersion.length > 0) {
+      url += '&app_version=' + encodeURIComponent(this.appVersion);
+    }
+    return url;
   }
 }
 

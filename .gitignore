@@ -18,6 +18,10 @@ app/build-profile.json5.backup
 
 # 签名材料（含设备 UDID 与证书，严禁提交）
 app/signing/
+app/entry/signing/
+**/*.p12
+**/*.p7b
+**/*.cer
 
 # 依赖
 app/oh_modules/

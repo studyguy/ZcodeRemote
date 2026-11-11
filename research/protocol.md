@@ -1,7 +1,10 @@
-# ZCode Web Remote Control 协议规范（逆向整理）
+# ZCode Web Remote Control 历史协议笔记（V1/V2 原生栈归档）
 
-> 基线版本：ZCode 桌面端 3.14.4（Windows）、云端页面 `https://zcode.z.ai/remote/v4`（2026-10 抓取）。
-> 来源：桌面 bundle `D:\Program Files\Zcode\resources\app.asar`（out/main）、云端 SPA `index-B-ilXaCQ.js` / `src-wmk2orCZ.js`、本机实测探针（probe/probe.mjs）。
+> **当前运行架构（2026-11-11）**：ZcodeRemote 使用 WebView 壳优先方案，官方网页承载任务/会话/审批。本文件其余内容是旧原生 relay 与 RPC bridge 的逆向笔记，只供历史研究，不是当前应用协议契约。
+>
+> 当前壳↔网页事件桥、允许的网页/OAuth 域与认证态安全边界见 [`HANDOFF.md`](../HANDOFF.md) 和 `app/entry/src/main/ets/bridge/ShellBridge.ets`。
+>
+> 本文示例只使用占位符。不要添加真实 JWT、sid/mid、二维码 URL、设备信息、用户路径、IP 或任务内容。
 
 ## 0. 总体架构
 
@@ -15,9 +18,9 @@
 - 桌面端与手机端都**主动外连**同一个云端 WebSocket 中继（本机不监听端口）。
 - 二维码内容：`https://zcode.z.ai/remote/v4?sid=<deviceSid>&hash=<passHash>&t=<客户端毫秒时间戳>&mid=<deviceMid>&name=<设备名>&app_version=<版本>`
 - 配对凭证：
-  - `deviceSid`（`d_` 前缀）：中继签发的设备会话 ID，桌面端持久化于 `~/.zcode/v2/setting.json` 键 `webRemoteControlExternalRelayDevice.deviceSid`。
-  - `passHash` = `base64(sha256(password))`，password 为首次启用时随机生成（24 字节 base64url），持久化于 `~/.zcode/v2/credentials.json` 键 `web-remote-control:external-relay:pass_hash`。
-  - **`sid`+`hash` 长期有效，仅桌面端手动"重置配对"才轮换** → 一次绑定可行（已实测：重启桌面后旧凭证通过中继 challenge，返回 `pair_status=waiting` 而非 AUTH_FAILED）。
+  - `deviceSid`（协议分配的设备会话 ID）：桌面端保存在其用户配置目录的设置存储中。
+  - `passHash`：V1 历史协议使用的密码摘要；仅用于理解旧版 challenge-response，不是当前壳的凭证来源。
+  - V1 配对凭证只作历史协议示例；不要从开发机配置复制真实值到文档、样本或日志。
   - `t` 是客户端时间戳，每次连接可重新生成。
 
 ## 1. 中继 WebSocket 层（JSON 文本帧）

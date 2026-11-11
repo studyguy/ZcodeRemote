@@ -19,6 +19,9 @@
           "abilities": ["EntryAbility"],
           "when": "inuse"
         }
+      },
+      {
+        "name": "ohos.permission.PRIVACY_WINDOW"
       }
     ],
     "abilities": [
@@ -31,10 +34,22 @@
         "startWindowIcon": "$media:app_icon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
+        "orientation": "auto_rotation_restricted",
         "skills": [
           {
             "entities": ["entity.system.home"],
             "actions": ["action.system.home"]
+          },
+          {
+            "entities": ["entity.system.browsable"],
+            "actions": ["ohos.want.action.viewData"],
+            "uris": [
+              {
+                "scheme": "https",
+                "host": "zcode.z.ai",
+                "pathStartWith": "/remote/v4"
+              }
+            ]
           }
         ]
       }

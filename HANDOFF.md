@@ -1,120 +1,102 @@
 # ZcodeRemote 解锁文档（HANDOFF）
 
 > 本文档是项目的完整交接资料：任何开发者或 AI 工具读完本文件即可接手开发。
-> 最后更新：2026-10-03。维护约定：**每次重大改动后同步更新本文件**。
+> 最后更新：2026-11-11。维护约定：**每次重大改动后同步更新本文件**。
 
 ---
 
 ## 1. 项目定位
 
-非官方的 [ZCode](https://github.com/zai-org/ZCode)（z.ai 开源编码 Agent，Apache-2.0）**鸿蒙原生伴侣客户端**。桌面端 ZCode 自带"移动端远程控制"功能（扫码后浏览器查看/控制对话），本工程将其实现为鸿蒙 APP：**扫码绑定一次，打开即连**，原生 UI 实现对话查看、任务管理、远程交互（发消息/中断/审批/模型切换）。
+ZcodeRemote 是非官方的 [ZCode](https://github.com/zai-org/ZCode) HarmonyOS 远程控制宿主。产品采用**WebView 壳优先架构**：扫码建立桌面绑定，官方远程网页负责任务、会话、审批与交互；原生层负责扫码、多设备绑定、登录态持久化、网页状态提示、本地通知、防截屏及系统返回手势。
 
-- 包名：`com.zcode.remote`；最低 API 12（实测跑在 HarmonyOS 7.0 阔折叠真机）
-- 协议：逆向自 ZCode 官方实现（桌面 Electron 端 + 云端中继 + 远程网页），完整规范见 `research/protocol.md`
-- 与 Z.ai 无隶属关系；ZCode 商标归其所有者（见 `NOTICE.md`）
+- 包名：`com.zcode.remote`；最低 API 12。
+- 当前网页入口：`https://zcode.z.ai/remote/v4`；仅允许官方 ZCode 与 OAuth 域名。
+- 当前 Web↔Shell 桥：`window.zrNative.post(tag, payload)` 单入口，定义见 `app/entry/src/main/ets/bridge/ShellBridge.ets`。
+- 与 Z.ai 无隶属关系；ZCode 商标归其所有者（见 `NOTICE.md`）。
 
-## 2. 当前状态（截至最后提交）
+## 2. 当前状态（壳优先，2026-11-11）
 
 | 项 | 状态 |
 |---|---|
-| 单机全链路（绑定→列表→会话→发消息→中断→审批→模型/思考/模式切换） | ✅ 真机验证通过 |
-| 全屏适配（窗口级全屏+手动避让，导航条悬浮于列表内容上） | ✅ 已验证 |
-| 归档过滤、项目分组折叠、独立任务置底、重复去重 | ✅ 已验证 |
-| 多电脑连接支持 | ⏳ **已设计未实现**（见 §10，这是下一个功能） |
-| 已知未对齐项 | 附件/@引用/新建任务/改名归档（协议已逆向，见 FEATURES.md） |
+| 纯 sid 二维码绑定 → 官方网页任务/项目列表 | ✅ HarmonyOS 真机验证通过 |
+| 登录态跨进程恢复（AuthMirror） | ✅ 已实现 |
+| 状态胶囊、WebView 主题联动、断网重试、通知/震动、防截屏 | ✅ 已实现 |
+| 多电脑扫码添加/切换/移除 | ✅ 已实现 |
+| 每任务运行数与审批状态徽标 | ⚠️ 运行数按任务行 spinner 统计；审批为有/无提示，不推断数量 |
+| 系统返回手势回退网页历史 | ✅ 已实现；不同网页视图仍需持续真机验收 |
 
-Git 提交历史（全部干净，无敏感数据）：
-```
-5a65cc1 移除任务卡"查看"文字 + 徽章点击重连 + 合并去重
-ec58db7 退出会话解除远程标记（任务桥→home桥替换）
-09656f4 真全屏适配（窗口级全屏+手动避让）
-5ab6958 任务列表打磨（查看提示/重连徽章/合并去重）
-519f1f8 首次提交（全部功能与加固）
-```
+当前主页面：Index（启动分流）→ BindPage（无绑定时扫码）或 WebStage（绑定后承载官方网页）；SettingsPage 管理多设备与偏好。`WebPage.ets` 是旧壳实现，仅留作迁移参考，不在当前路由中注册。
 
-## 3. 仓库结构
+原生 V1/V2 协议栈（RelayClient、RelayClientV2、ZcodeService、SessionPage）留在源码中作历史/研究参考，不属于当前产品运行路径。旧协议分析见 `research/protocol.md`，以本节和当前代码为准。
+
+**安全边界**：二维码只接受 `https://zcode.z.ai/remote/v4`；网页导航限定到 ZCode 官方及已确认的 OAuth 域；JWT 恢复脚本仅对 `https://zcode.z.ai` 注入；相机/麦克风权限只授予主站，其余来源拒绝。
+
+## 2.1 壳侧核心文件
+
+- `pages/Index.ets`：启动分流。
+- `pages/BindPage.ets`：扫码/粘贴、绑定确认、添加设备退路。
+- `pages/WebStage.ets`：官方网页容器、状态胶囊、横幅、重试、返回手势、设备菜单、通知与防截屏。
+- `bridge/ShellBridge.ets`：tag/payload 单入口、网页探测脚本、受限的 Shell→Web 命令。
+- `service/AuthMirror.ets`：ArkWeb 登录态镜像（只在 ZCode 主站恢复）。
+- `service/NotifyService.ets`：系统通知槽位与震动。
+- `store/BindingStore.ets` / `store/QrParser.ets`：多设备存储、官方域/路径校验、二维码解析。
+
+> WebView 登录态 JWT 属敏感数据，只写入应用私有存储；严禁日志、样例、截图或提交中出现 JWT、完整二维码 URL、设备 SID/MID、设备 UDID、用户主目录或任务标题。
+
+## 2.2 当前运行架构与敏感信息处理（2026-11-11，同步说明）
+
+本节为当前实现的权威说明；本文档前面的原生客户端条目是历史记录，不描述当前运行行为。
+
+- 当前入口：Index → BindPage（未绑定）/ WebStage（已绑定）；官方 WebView 承载任务列表、项目、会话和审批。
+- 登录态镜像只在官方主站 origin 恢复；OAuth 页面用于登录跳转，不接收已有 JWT 镜像。二维码、深链和路由 URL 均须经过官方域名/路径校验。
+- 相机/麦克风权限仅对 `https://zcode.z.ai` 请求授予；外部站点导航被拦截。
+- 日志只允许打印状态、计数、错误类型或 SID 短尾（确有诊断需要时）；严禁完整 SID/MID、JWT、绑定 URL、用户任务标题。
+- 本机凭证位于 HarmonyOS 应用私有存储；仓库与 Git 历史只含占位/通用协议示例。
+
+
 
 ```
 ZcodeRemote/
-├── HANDOFF.md            ← 本文件
-├── README.md             ← 面向使用者的介绍/构建/排查
-├── NOTICE.md             ← 上游 ZCode（Apache-2.0）出处声明
-├── LICENSE               ← MIT
-├── .gitignore            ← 构建产物/签名材料/本机配置/研究样本全部排除
-├── app/                  ← 鸿蒙 APP 工程（DevEco Studio / ArkTS，交付主体）
-│   ├── AppScope/ + build-profile.json5 + hvigorfile.ts + oh-package.json5
+├── HANDOFF.md / README.md / NOTICE.md / LICENSE
+├── app/
+│   ├── AppScope/ + build-profile.json5 + hvigorfile.ts
 │   ├── entry/src/main/
-│   │   ├── module.json5            # 权限仅 INTERNET + CAMERA
-│   │   └── ets/
-│   │       ├── protocol/           # 协议层（与 ZCode 解耦，可独立测试）
-│   │       │   ├── Bytes.ets / Crc32.ets        # varint/Base64/CRC-32
-│   │       │   ├── WireSerializer.ets           # 桥内 tagged 二进制序列化
-│   │       │   ├── FrameCodec.ets               # rpc-frame 分帧/组装（可靠层）
-│   │       │   ├── RelayClient.ets              # 中继 WSS（鉴权/心跳/重连）
-│   │       │   ├── ChannelClient.ets            # RPC 通道（请求/响应/事件）
-│   │       │   └── BridgeSession.ets            # 工作区桥（组合以上各层）
-│   │       ├── service/ZcodeService.ets  # 全局单例：绑定/连接/列表/快照/交互
-│   │       ├── store/               # BindingStore(凭证)+QrParser(二维码解析)
-│   │       ├── view/                # MarkdownParser + MarkdownView + MessageDataSource
-│   │       ├── model/               # Models.ets(数据模型) + AppError.ets(错误分类)
-│   │       ├── pages/               # Index(绑定+主页) / SessionPage / SettingsPage
-│   │       └── entryability/        # 入口（全屏/主题/避让高度下发）
-│   ├── README.md / FEATURES.md      # 构建指南 / 与网页端功能对比表
-│   └── build-and-install.sh / serve-hap.sh   # 一键构建安装 / 局域网分发
-├── research/
-│   └── protocol.md       # ★ 完整协议规范（逆向成果，最重要的文档之一）
-└── probe/                # Node 工具：探针/协议单测/图标生成/上游代码切片
-    ├── probe.mjs~probe5.mjs   # 各期协议验证探针（凭证从 ~/.zcode/v2 本地读取）
-    ├── test_protocol.js       # 协议层单元测试（无需连接）
-    └── main|host|spa|renderer # ZCode 上游代码切片（出处见 NOTICE.md）
+│   │   ├── ets/pages/       # Index / BindPage / WebStage / SettingsPage / LoginWebViewPage
+│   │   ├── ets/bridge/      # ShellBridge：Web↔Shell 单入口事件桥与 DOM 探测
+│   │   ├── ets/service/     # AuthMirror / NotifyService；旧 ZcodeService 仅供迁移参考
+│   │   ├── ets/store/       # BindingStore / QrParser
+│   │   ├── ets/model/       # BindingInfo 与展示模型
+│   │   └── ets/protocol/    # 历史 V1/V2 原生协议参考，不由壳主流程启动
+│   └── README.md / FEATURES.md / 构建与安装脚本
+├── research/protocol.md    # 历史 V1/V2 协议逆向存档（非当前运行契约）
+└── probe/                  # 协议测试与历史研究脚本；不得包含真实凭证或会话样本
 ```
 
-## 4. 协议核心（详见 research/protocol.md）
+## 4. 协议与网页集成
 
-**架构**：桌面端与手机端各自主动外连云端中继 `wss://<endpoint>/ws`，互不开监听端口。二维码内容 = `https://<endpoint>/remote/v4?sid&hash&t&mid&name&app_version`，其中 sid+hash 是**长期配对凭证**（桌面端持久化，仅"重置配对"轮换）。
+**当前产品路径是官方 WebView 壳，不直接连接中继。** 工作区的 V1/V2 原生协议章节仅用于历史研究与故障取证；当前 UI、登录态、任务/会话数据均由 ZCode 官方网页处理，壳侧只通过 `bridge/ShellBridge.ets` 的单一 JSON 事件桥提供宿主能力。
 
-**手机端连接时序**（role=`terminal`，注意不是 web）：
-1. WSS 连接 → `auth_init{role:"terminal", device_sid}` → 收 `auth_challenge{nonce}`
-2. 证明 = `base64url(HMAC-SHA256(key=passHash, msg="nonce|terminal|deviceSid"))` → `auth_response`
-3. `auth_ack{pair_status: waiting|matched}` → matched 后可收发
-4. 心跳 `pair_status_query` 每 10s，30s 无 ack 重连
-5. 应用消息必须包帧：`{type:"data", payload, client_ts}`（发裸 payload 会被 WRONG_PARAM 断链）
+- Web 页面 URL 从官方 `https://zcode.z.ai/remote/v4` 与扫码得到的 sid/name/mid/version 元数据构造；不在二维码 URL 中持久保存或外传 JWT。
+- 登录 OAuth 页面可跳转到已审核的官方 OAuth 域；JWT 镜像只在 `https://zcode.z.ai` 主站注入。
+- 网页主题、视图、审批提示、运行任务统计、任务完成通过 tag/payload 事件回传；兼容层不伪造配对 hash。
+- 原生 V1/V2 直接中继协议、RPC bridge 与任务快照细节见后续章节，属于归档参考，不是当前产品运行依赖。
 
-**两级数据面**：
-- JSON 应用层：`bootstrap-request`、`workspace-list-request`、`workspace-bridge-open`、`mobile-view-state-update`
-- 桥内二进制（打开桥后）：rpc-frame 分帧（CRC-32+base64 分片+双向 seq）→ tagged 序列化 → VS Code 风格 RPC 通道
+## 5. 当前 APP 架构要点
 
-**关键 RPC 通道**（桥内，方法参数是 `[参数对象]` 数组的 JSON）：
+- **启动分流**：Index 读取 BindingStore；有绑定进入 WebStage，无绑定进入 BindPage。
+- **主业务**：WebStage 内嵌官方远程页面，管理状态胶囊、网页历史返回、断网重试、异常接管、多设备切换、系统通知、防截屏和 OAuth 登录态镜像。
+- **消息桥**：`window.zrNative.post(tag, payload)` 单入口；事件定义与注入逻辑见 `app/entry/src/main/ets/bridge/ShellBridge.ets`。
+- **绑定数据**：BindingStore 保存多设备元数据与激活设备；boundUrl 从元数据构造。JWT 使用应用私有存储，WebView 注入限制在官方主站。
+- **原生协议栈**：`RelayClient.ets`、`RelayClientV2.ets`、`BridgeSession`、`ZcodeService` 保留作研究/迁移资产，当前壳流程不得同时启动原生 relay，以免同设备被中继踢下线。
+- **安全**：仅接受 `https://zcode.z.ai/remote/v4` 二维码；WebStage 只导航到受信任 ZCode/OAuth 域；相机/麦克风仅官方主站可申请；日志不记录完整 SID、JWT、绑定 URL 或任务标题。
 
-| 通道 | 常用方法 |
-|---|---|
-| `zcode-task` | `getTaskSnapshotWithEtag({taskId,workspacePath,clientMode:"web-remote-replayable",ifNoneMatch?})`、`listTasks({workspacePath})`、rename/archive/pin 等 |
-| `zcode-agent` | `sendPrompt({workspacePath,sessionId,inputId,content,clientMode})`、`sendConversationCommandV4({workspacePath,envelope:{type:"stop"/"resolveInteraction"/"sendText",payload,sessionId}})`、`setModel/setThoughtLevel/setMode({sessionId,...})`、`readSession` |
-| `model-selection` | `getView([{workspacePath}])` → **已启用渠道+模型注册表视图**（含真实 contextWindow，桌面选择器同源） |
 
-**快照结构**：`{meta:{model,thoughtLevel,mode,...}, messages:[{id,role,content,timestamp,parts?,tools?...}], runtime:{activeTurnKind,contextUsage:{used,size},pendingPermissions,pendingElicitations,...}, configOptions}`。
-- **parts 是渲染顺序权威**：`[{type:"thought"|"content"|"tool-call", content, toolIndex}]`，tool-call 引用 `tools[toolIndex]={toolName,status,input,output}`
-- **陷阱**：`runtime.contextUsage.size` 是 session 层压缩阈值（GLM-5.3-Flash 记 200K），真实模型窗口（1M）在 `model-selection.getView()` 的模型属性里
+## 6. 构建（开发环境）
 
-**workspaceKey** = `workspaceIdentity.trim() || workspacePath`（与桌面端一致的分组/定位键）。
-
-## 5. APP 架构要点
-
-- **单例** `ZcodeService`：持有绑定、RelayClient、任务/工作区列表、桥会话。页面通过 `addListener/removeListener` 订阅状态通知（notify 驱动 UI 刷新），操作直接调 Service 方法
-- **凭证**：passHash 存系统加密资产库（AssetStoreKit，alias=`zcode_pass_hash`），sid/mid/name 存 Preferences；**勿把凭证写日志**（现有日志只打 sid 尾号与 proof 长度）
-- **主题**：颜色全部资源化（`resources/base/element/color.json` 浅色 + `resources/dark/element/color.json` 深色），外观偏好存 Preferences，EntryAbility `setColorMode` 应用
-- **全屏**：窗口级 `setWindowLayoutFullScreen(true)` + 避让高度经 AppStorage（`statusBarHeight`/`navBarHeight`）下发，页面用 `@StorageProp` 做顶部避让；底部不避让（列表穿过导航条）
-- **错误**：`model/AppError.ets` 分类体系（AUTH/DESKTOP_OFFLINE/TIMEOUT/BRIDGE...+suggestion），所有失败路径应产出 AppError
-- **会话页退出**：必须调 `closeTaskBinding(workspaceKey)`（任务桥→home 桥替换），否则桌面端"被远程查看"标记残留
-
-## 6. 构建与签名环境（本机事实）
-
-- DevEco Studio 26.0 位于 `D:\Program Files\DevEco Studio`（自带 node/hvigor 6.26.8/SDK API 26）
-- **CLI 构建**：`cd app && NODE_HOME="D:\Program Files\DevEco Studio\tools\node" DEVECO_SDK_HOME="D:\Program Files\DevEco Studio\sdk" "D:/Program Files/DevEco Studio/tools/hvigor/bin/hvigorw.bat" --no-daemon assembleHap`
-- `app/local.properties`（hwsdk.dir）不入仓
-- **签名**：真机只认华为签发证书（OpenHarmony 社区证书会被拒 `9568257`）。唯一路径 = DevEco 自动签名（需登录华为账号），材料生成于 `~/.ohos/config/` 并写入 build-profile.json5。**build-profile.json5 已 git skip-worktree**：仓库里是占位签名材料，本机是真实材料——改它不会进提交，`git status` 也不显示
-- API 26 的版本格式是 `"26.0.0"`（无括号）；API≤25 才是 `"5.0.0(12)"` 格式
-- 产物：`app/entry/build/default/outputs/default/entry-default-signed.hap`；装机：`hdc install -r <hap>`；启动：`hdc shell aa start -b com.zcode.remote -a EntryAbility`
+- 使用 DevEco Studio 与 HarmonyOS SDK；各开发机本地 SDK 路径写在 `app/local.properties`，不入仓。
+- 构建命令见 `app/README.md`；签名由开发者在 DevEco Studio 配置，本机签名文件不提交。
+- `app/build-profile.json5` 在部分开发机使用 `skip-worktree` 保护本地签名配置；提交前确认只包含仓库模板，不强制添加该文件。
+- HAP 位于 `app/entry/build/default/outputs/default/`，构建产物由 Git ignore 排除。
 
 ## 7. 已知坑清单（全部实测踩过）
 
@@ -138,65 +120,54 @@ ZcodeRemote/
 - HMAC 密钥生成器算法名是 `'HMAC'`（不是 'SHA256'，那是 createMac 的摘要名）
 - workspaceKey = `workspaceIdentity.trim() || workspacePath`
 
-**调试**：`hdc shell "hilog -x | grep ZCRemote"`（TAG=ZCRemote）；模拟点击 `hdc shell uitest uiInput click X Y`（注意设备坐标 ≠ 截图坐标，需按分辨率换算）；截图放 `C:\Users\Admin\AppData\Local\Temp\zcoderemote\` 且**调试完立即删**（用户红线），报错一律从日志读。
+**调试**：`hdc shell "hilog -x | grep ZCRemote"`（TAG=ZCRemote）；截图只存系统临时目录，调试验证完立即删除（不要放进项目或提交）。
 
 ## 8. 关键决策记录（ADR）
 
 | 决策 | 理由 |
 |---|---|
-| 纯原生 UI 而非 WebView 壳 | 用户明确选择；代价是需完整逆向协议（已完成） |
-| 上下文分母用内置修正表兜底 | session 层 contextWindow 是压缩阈值非标称值；真实值在 model-selection 注册表（远程可读）→ 已改为动态读取，修正表仅兜底 |
-| 退出会话页用 home 桥替换任务桥 | 桌面无 bridge-close 消息；home 桥（无 taskId，entryKind=home）是桌面 startDraft 的标准路径，替换后"被远程查看"标记解除 |
-| 会话内容用 etag 轮询而非接 v4 订阅流 | v4 流（topic/fragment）协议复杂；3s etag 轮询观感一致且实现简单。未来需要即时性再接 `sessionSubscribe` |
-| 任务列表 = bootstrap + 全量合并 | bootstrap 只推当前窗口工作区；用 `listGroupedTaskViewStructure({workspaceScopes:[]})`+`listTasks({workspacePath})` 补全独立任务，archived 过滤 |
-| probe/ 上游切片入仓 | ZCode 已开源（Apache-2.0），出处已在 NOTICE.md 声明；切片仅作协议研究 |
-| 凭证存 AssetStoreKit | 系统级加密，卸载即销毁；sid 等非敏感字段走 Preferences |
+| WebView 壳优先，官方网页承载业务 | 桌面/网页持续更新；避免在手机端重复实现任务、会话、审批等业务协议 |
+| 壳↔网页使用单入口 tag/payload 桥 | 缩小接口面，降低网页 DOM/接口变化对原生代码的影响 |
+| JWT 仅在官方主站注入 | OAuth 子域可以完成登录跳转，但不接收壳镜像的已有 JWT |
+| 运行任务按独立任务行 spinner 探测 | 新版 SPA 的任务行无稳定状态文本；待确认仅显示存在性，不伪造全局数量 |
+| 原生 V1/V2 协议实现保留为历史资料 | 当前业务由官方网页运行；避免原生 relay 与网页连接互相踢线 |
 
 ## 9. 安全红线
 
-1. **绝不提交**：`research/samples/`（真实会话数据）、签名材料（含设备 UDID）、`~/.ohos` 引用的真实签名配置、任何 deviceSid/passHash/UDID/序列号/API key、`local.properties`（.gitignore 已覆盖，提交前务必跑隐私终扫：`grep -rn "Admin\|UDID前8位\|d_5zbj\|56V02\|192.168" --exclude-dir=.git .`）
-2. 历史教训：曾有含完整配对凭证的样本文件被删除，但**该凭证建议在桌面端"重置配对"使其失效**（待用户执行）
-3. 二维码内容等同凭证，文档/截图不得外传
+1. 不提交真实会话样本、签名材料、设备 UDID、完整二维码 URL、SID/MID、JWT/API key、私有 IP、用户主目录或任务标题。
+2. `app/build-profile.json5` 可能被开发机以 `skip-worktree` 保护；提交前核对其暂存内容，仓库只保留占位配置。
+3. 二维码与 WebView 登录态均视为凭证；不进入文档、截图、日志、测试夹具或 Git 历史。
+4. 二维码解析仅接受官方 HTTPS 主站与 `/remote/v4` 路径；WebStage 的 JWT 恢复只对主站注入，权限请求按来源校验。
+5. 提交前检查当前 diff、全部待推送提交历史及 staged tree 中是否有上述敏感数据；不在扫描命令中写入真实凭证值。
 
-## 10. 待办与路线图
+## 10. 后续候选
 
-### 10.1 多电脑连接（已设计，最高优先级）
-需求：一台 APP 同时连接两台电脑的不同 ZCode，可即时切换。
-- 调研结论：不同 device_sid 在中继是独立会话（互不干扰），双连接可行
-- **设计方案**（已论证）：
-  - BindingStore 多绑定：列表存 Preferences JSON，passHash 按独立 asset alias 存储，旧单绑定自动迁移
-  - 抽 `service/Connection.ets`（ZcodeConnection 类）：把 ZcodeService 的单机状态与方法整体迁入（binding/relay/tasks/groups/bridge/全部操作方法）
-  - ZcodeService 变管理器：`Map<sid, Connection>` + activeSid + `switchTo(sid)` + 增删绑定 API；页面公开 API 委托 active()
-  - UI：主页设备名点击弹菜单（每台名称+状态+✓）即点即切；设置页设备列表（切换/逐台解绑）；绑定流程扫码即新增（同 sid 覆盖）
-  - 会话页记录所属 sid，操作固定该连接；检测到切换 → 自动退回列表
-  - 边界：同名设备加 sid 尾号区分；解绑使用中设备自动切剩余；同 sid 重扫覆盖更新
-- 工作量估计：ZcodeService 拆分重构为主（约 1 个完整开发轮次）
+### 10.1 多电脑与设置
+多绑定存储、切换、添加、移除已在壳侧实现（`BindingStore` + WebStage/SettingsPage）。后续维护以官方网页登录页和官方设备选择器行为为准；不实现原生双中继连接。
 
 ### 10.2 后续候选
-- 附件/@引用（attachment V4 协议已逆向：attachmentBegin/Chunk/Commit）
-- 新建任务（createSession 协议已知）、任务改名/归档 UI
-- 文件变更面板（快照 fileChanges 字段已在）、计划 todos 面板（plan 字段已在）
-- 接 v4 订阅流（`sessionSubscribe`）替代轮询，获得真正的推送实时性
-- 完整 Markdown 渲染（图片/任务列表/脚注）
+- 按新版官方网页 DOM/事件改动维护 WebStage 的运行任务/待确认提示探测器
+- 完善系统返回手势与不同设备尺寸/折叠态验收
+- 保持 OAuth host allowlist 与登录态注入 origin 同步评审
+- 如未来网页提供正式宿主 API，优先使用正式 API 替代 DOM 探测
 
-### 10.3 其他平台移植指引
-iOS/Android/桌面客户端：`research/protocol.md` 是完整规范，`probe/*.mjs` 是可运行的 Node 参考实现，`app/entry/src/main/ets/protocol/` 是逐层对应的实现范本。核心即：WSS + HMAC(terminal) + data 帧包装 + bootstrap → 桥 → 通道 RPC。
+### 10.3 其他平台参考
+`research/protocol.md` 与 `app/entry/src/main/ets/protocol/` 是历史原生协议研究资料，不是当前壳方案的运行依赖。其他平台优先内嵌官方远程网页并复用宿主能力设计；只有官方网页无法覆盖的能力才考虑原生协议。
 
 ## 11. 验证流程（每次改动后）
 
 ```bash
-# 1. 协议单测（如有协议层改动）
+# 1. 构建协议代码改动时才运行历史协议单测
 cd probe && node test_protocol.js
-# 2. 构建（见 §6 命令）
-# 3. 装机启动
+# 2. HarmonyOS APP 构建（见 app/README.md）
+# 3. 真机安装与启动
 hdc install -r app/entry/build/default/outputs/default/entry-default-signed.hap
 hdc shell aa start -b com.zcode.remote -a EntryAbility
-# 4. 日志验证
+# 4. 检查壳事件日志
 hdc shell "hilog -x | grep ZCRemote"
-# 5. 隐私终扫（提交前）
-grep -rn "Admin\|56V02\|6E7098\|d_5zbj\|0000001A" --exclude-dir=.git .
 ```
 
+提交前检查 diff、暂存区和待推送历史：确认无真实凭证、完整绑定 URL、设备标识、个人路径、私有 IP、任务标题、签名材料或运行日志。
 ## 12. Git 工作流
 
 - 仓库已初始化，首次提交起历史干净；提交署名用 `ZcodeRemote <zcoderemote@users.noreply.github.com>`
